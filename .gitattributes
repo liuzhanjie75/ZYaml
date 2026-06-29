@@ -1,0 +1,13 @@
+# Normalize line endings to LF in the repo; let Git translate to CRLF on
+# checkout for Windows. Source files are UTF-8.
+* text=auto eol=lf
+
+*.cpp  text eol=lf
+*.ixx  text eol=lf
+*.cppm text eol=lf
+*.hpp  text eol=lf
+*.md   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.txt  text eol=lf
+LICENSE text eol=lf
