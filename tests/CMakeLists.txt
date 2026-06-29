@@ -12,5 +12,14 @@ if(MSVC)
     target_compile_options(test_smoke PRIVATE /utf-8 /W4 /WX /Zc:preprocessor /permissive-)
 endif()
 
-# Tests run without assertions-as-errors; the test returns non-zero on failure.
 add_test(NAME zyaml_smoke COMMAND test_smoke)
+
+add_executable(test_parser test_parser.cpp)
+target_link_libraries(test_parser PRIVATE ZYaml::ZYaml)
+set_target_properties(test_parser PROPERTIES CXX_SCAN_FOR_MODULES ON)
+target_compile_features(test_parser PRIVATE cxx_std_23)
+if(MSVC)
+    target_compile_options(test_parser PRIVATE /utf-8 /W4 /WX /Zc:preprocessor /permissive-)
+endif()
+
+add_test(NAME zyaml_parser COMMAND test_parser)

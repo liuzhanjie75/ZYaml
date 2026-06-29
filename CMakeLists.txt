@@ -59,7 +59,10 @@ target_sources(ZYaml
         BASE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src"
         FILES
             src/zyaml.cppm
+            src/error.ixx
             src/node.ixx
+            src/scanner.ixx
+            src/parser.ixx
 )
 
 target_include_directories(ZYaml PUBLIC

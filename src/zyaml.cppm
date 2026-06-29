@@ -1,20 +1,19 @@
 // ZYaml — primary module unit.
 //
-// Exposes the public API of the library. Consumers write `import ZYaml;` and
-// get the full surface. Internals are partitioned (:node, :scanner, :parser,
-// :emitter, :comment, :error) but those partitions are re-exported here so
-// the consumer never imports a partition directly.
+// Exposes the public API. Consumers write `import ZYaml;`. Internals are
+// partitioned (:node, :error, :scanner, :parser, ...). Partitions are
+// re-exported here so the consumer never imports a partition directly.
 //
-// M0 milestone: only :node exists, with a minimal Node (makeNull + isNull)
-// to validate the build pipeline. Subsequent milestones expand the API.
+// `export import :partition` makes the partition's exported declarations
+// visible to anyone who imports ZYaml — this avoids the incomplete-type
+// issues that `using` aliases can hit on MSVC when the aliased type's
+// members reference standard-library templates.
 
 export module ZYaml;
 
-import :node;
+export import :error;
+export import :node;
+export import :parser;
 
-export namespace zyaml {
-
-using NodeType = ::zyaml::node::NodeType;
-using Node     = ::zyaml::node::Node;
-
-} // namespace zyaml
+// parse() is a free function in namespace zyaml (declared in :parser);
+// re-exporting :parser already brings it in.
