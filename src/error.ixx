@@ -77,7 +77,9 @@ public:
     [[nodiscard]] const YamlError& error() const { return std::get<1>(value_); }
 
     [[nodiscard]] const T* operator->() const { return &std::get<0>(value_); }
-    [[nodiscard]] const T& operator*() const { return std::get<0>(value_); }
+    [[nodiscard]] const T& operator*() const& { return std::get<0>(value_); }
+    [[nodiscard]] T& operator*() & { return std::get<0>(value_); }
+    [[nodiscard]] T operator*() && { return std::move(std::get<0>(value_)); }
 
 private:
     std::variant<T, YamlError> value_;

@@ -8,6 +8,7 @@ out/
 .vscode/
 .idea/
 .cache/
+.codegraph/
 *.user
 *.suo
 *.sln.docstates

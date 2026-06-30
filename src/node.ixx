@@ -56,6 +56,39 @@ class Node {
 public:
     Node() = default;
 
+    // Nodes are NOT copyable by default — map/sequence storage lives in a
+    // shared_ptr, so an implicit copy would alias the same backing storage
+    // and a mutation through one Node would silently affect its copies.
+    // Use clone() for an independent deep copy, or move for ownership
+    // transfer. This makes the shared-ownership semantics explicit.
+    Node(const Node&) = delete;
+    Node& operator=(const Node&) = delete;
+    Node(Node&&) noexcept = default;
+    Node& operator=(Node&&) noexcept = default;
+
+    // Deep copy: the scalar, and any map/sequence children (recursively),
+    // are duplicated. The result is independent of the original.
+    [[nodiscard]] Node clone() const {
+        Node n;
+        n.type_ = type_;
+        n.scalar_ = scalar_;
+        if (map_) {
+            n.map_ = std::make_shared<MapStorage>();
+            n.map_->entries.reserve(map_->entries.size());
+            for (const auto& [k, v] : map_->entries) {
+                n.map_->entries.emplace_back(k, v.clone());
+            }
+        }
+        if (seq_) {
+            n.seq_ = std::make_shared<SeqStorage>();
+            n.seq_->entries.reserve(seq_->entries.size());
+            for (const auto& e : seq_->entries) {
+                n.seq_->entries.push_back(e.clone());
+            }
+        }
+        return n;
+    }
+
     [[nodiscard]] static Node makeNull() {
         Node n;
         n.type_ = NodeType::Null;

@@ -68,6 +68,15 @@ public:
         // nested child rather than a sibling of the dash.
         std::optional<std::size_t> inlineIndent;
 
+        // ZE_READ: read a quoted/plain scalar or flow collection, propagating
+        // any UnclosedQuote/BadEscape/UnclosedFlow error up through scanAll's
+        // Result<vector<Token>>. Each use site gets a uniquely-named result
+        // variable to avoid shadowing warnings under /W4 /WX.
+#define ZE_READ(name, expr) \
+    auto _r_##name = (expr); \
+    if (!_r_##name) return _r_##name.error(); \
+    std::string name = std::move(*_r_##name)
+
         while (!atEnd()) {
             skipBlankLines();
             if (atEnd()) break;
@@ -78,17 +87,13 @@ public:
             if (peek() == '-' && (peekAt(1) == ' ' || peekAt(1) == '\t' ||
                                   peekAt(1) == '\n' || peekAt(1) == '\r' || atEndAfter(1))) {
                 advance();  // consume '-'
-                // inlineIndent is the column right after '-' (before skipping
-                // the following space). For "  - name", dash is at col 3, so
-                // inlineIndent=4 — matching the physical indent of the next
-                // line's "    name" continuation.
                 inlineIndent = column_;
                 skipSpaces();
                 Token t{TokenType::SeqEntry, {}, line_, column_, pos_, indent};
                 tokens.push_back(t);
                 // Optional inline value on the same line.
                 if (!atEnd() && peek() != '\n' && peek() != '\r') {
-                    std::string scalar = readScalarValue();
+                    ZE_READ(scalar, readScalarValue());
                     skipSpaces();
                     if (peek() == ':') {
                         advance();
@@ -96,7 +101,7 @@ public:
                         tokens.push_back(me);
                         skipSpaces();
                         if (!atEnd() && peek() != '\n' && peek() != '\r') {
-                            std::string val = readScalarValue();
+                            ZE_READ(val, readScalarValue());
                             if (!val.empty()) {
                                 Token v{TokenType::Scalar, std::move(val), line_, column_, pos_, *inlineIndent};
                                 tokens.push_back(v);
@@ -115,7 +120,7 @@ public:
             if (peek() == '[' || peek() == '{') {
                 const char open = peek();
                 TokenStyle style = (open == '[') ? TokenStyle::FlowSeq : TokenStyle::FlowMap;
-                std::string raw = readFlowCollection();
+                ZE_READ(raw, readFlowCollection());
                 Token t{.type = TokenType::FlowCollection, .text = std::move(raw),
                         .line = line_, .column = column_, .offset = pos_, .indent = indent,
                         .style = style};
@@ -124,7 +129,7 @@ public:
                 inlineIndent.reset();
                 continue;
             }
-            std::string scalar = readScalarValue();
+            ZE_READ(scalar, readScalarValue());
             skipSpaces();
             if (peek() == ':') {
                 advance();
@@ -135,13 +140,13 @@ public:
                     if (peek() == '[' || peek() == '{') {
                         const char open = peek();
                         TokenStyle vstyle = (open == '[') ? TokenStyle::FlowSeq : TokenStyle::FlowMap;
-                        std::string raw = readFlowCollection();
+                        ZE_READ(raw, readFlowCollection());
                         Token v{.type = TokenType::FlowCollection, .text = std::move(raw),
                                 .line = line_, .column = column_, .offset = pos_, .indent = indent,
                                 .style = vstyle};
                         tokens.push_back(v);
                     } else {
-                        std::string val = readScalarValue();
+                        ZE_READ(val, readScalarValue());
                         if (!val.empty()) {
                             Token v{TokenType::Scalar, std::move(val), line_, column_, pos_, indent};
                             tokens.push_back(v);
@@ -156,6 +161,7 @@ public:
             }
             inlineIndent.reset();
         }
+#undef ZE_READ
         tokens.push_back(Token{TokenType::EndOfInput, {}, line_, column_, pos_, 0});
         return tokens;
     }
@@ -231,15 +237,23 @@ private:
 
     // Read a quoted scalar starting at the current '"' or '\''. Returns the
     // decoded content (escapes processed). Advances past the closing quote.
-    // Double-quoted honors \n \t \\ \" \' \0. Single-quoted uses '' for '.
-    [[nodiscard]] std::string readQuoted() {
+    // Double-quoted honors \n \t \r \\ \" \' \0 \a \b \f \v \e; unknown
+    // escapes are a BadEscape error (YAML spec). Reaching EOF or newline
+    // without a closing quote is an UnclosedQuote error — the legacy
+    // library silently returned partial text.
+    [[nodiscard]] Result<std::string> readQuoted() {
+        const std::size_t startLine = line_;
+        const std::size_t startCol = column_;
+        const std::size_t startOffset = pos_;
         const char quote = peek();
         advance();  // consume opening quote
         std::string out;
+        bool closed = false;
         while (!atEnd()) {
             const char c = peek();
+            if (c == '\n' || c == '\r') break;  // unterminated on this line
             if (quote == '"') {
-                if (c == '"') { advance(); break; }
+                if (c == '"') { advance(); closed = true; break; }
                 if (c == '\\' && !atEndAfter(1)) {
                     advance();
                     const char e = peek();
@@ -251,7 +265,17 @@ private:
                         case '"': out += '"'; break;
                         case '\'': out += '\''; break;
                         case '0': out += '\0'; break;
-                        default: out += e; break;  // unknown escape: literal
+                        case 'a': out += '\a'; break;
+                        case 'b': out += '\b'; break;
+                        case 'f': out += '\f'; break;
+                        case 'v': out += '\v'; break;
+                        case 'e': out += '\x1b'; break;
+                        case '/': out += '/'; break;
+                        case ' ': out += ' '; break;
+                        default:
+                            return YamlError{YamlErrorCode::BadEscape,
+                                             {line_, column_, pos_},
+                                             std::string("unknown escape \\") + e};
                     }
                     advance();
                     continue;
@@ -259,21 +283,29 @@ private:
                 out += c;
                 advance();
             } else {
-                // single-quoted: '' is a literal '
                 if (c == '\'') {
                     if (peekAt(1) == '\'') { out += '\''; advance(); advance(); continue; }
                     advance();  // consume closing '
+                    closed = true;
                     break;
                 }
                 out += c;
                 advance();
             }
         }
+        if (!closed) {
+            return YamlError{YamlErrorCode::UnclosedQuote,
+                             {startLine, startCol, startOffset},
+                             quote == '"' ? "unterminated double-quoted scalar"
+                                          : "unterminated single-quoted scalar"};
+        }
         return out;
     }
 
     // Read a scalar value: if it starts with a quote, readQuoted; else plain.
-    [[nodiscard]] std::string readScalarValue() {
+    // Plain scalars never fail; quoted scalars can fail with UnclosedQuote /
+    // BadEscape. Callers must thread the error up through scanAll's Result.
+    [[nodiscard]] Result<std::string> readScalarValue() {
         if (peek() == '"' || peek() == '\'') {
             return readQuoted();
         }
@@ -282,13 +314,21 @@ private:
 
     // Read a complete flow collection starting at the current '[' or '{',
     // including nested collections and quoted strings. Returns the raw text
-    // with the outer brackets/braces included. The parser interprets it.
-    [[nodiscard]] std::string readFlowCollection() {
+    // with the outer brackets/braces included. A flow collection that
+    // reaches EOF or a newline without a matching close is an UnclosedFlow
+    // error — previously it returned the truncated text and the parser
+    // silently accepted it as an empty/partial collection.
+    [[nodiscard]] Result<std::string> readFlowCollection() {
+        const std::size_t startLine = line_;
+        const std::size_t startCol = column_;
+        const std::size_t startOffset = pos_;
         std::size_t start = pos_;
         const char open = peek();
-        char close = (open == '[') ? ']' : '}';
-        int depth = 0;
+        const char close = (open == '[') ? ']' : '}';
+        advance();  // consume the outer open; it's not a nested opener
+        int depth = 0;  // count of NESTED openers still unmatched
         char quote = 0;
+        bool closed = false;
         while (!atEnd()) {
             const char c = peek();
             if (quote) {
@@ -300,18 +340,18 @@ private:
             if (c == '"' || c == '\'') { quote = c; advance(); continue; }
             if (c == '[' || c == '{') { ++depth; advance(); continue; }
             if (c == ']' || c == '}') {
-                if (depth == 0 && c == close) { advance(); break; }
-                if (depth > 0) { --depth; advance(); continue; }
-                // Mismatched close — stop here; parser will report.
-                break;
+                if (depth > 0) { --depth; advance(); continue; }  // closes a nested opener
+                if (c == close) { advance(); closed = true; break; }  // closes the outer
+                break;  // mismatched close (e.g. ']' when '}' expected)
             }
-            if (c == '\n' || c == '\r') {
-                // Flow can span lines, but M3 keeps it single-line for
-                // simplicity. Stop at newline; the parser treats truncated
-                // flow as a parse error.
-                break;
-            }
+            if (c == '\n' || c == '\r') break;  // single-line flow only
             advance();
+        }
+        if (!closed) {
+            return YamlError{YamlErrorCode::UnclosedFlow,
+                             {startLine, startCol, startOffset},
+                             open == '[' ? "unclosed flow sequence '['"
+                                         : "unclosed flow map '{'"};
         }
         return std::string(source_.substr(start, pos_ - start));
     }

@@ -56,11 +56,20 @@ namespace detail {
                                                 std::size_t line,
                                                 std::size_t column,
                                                 std::size_t offset) {
-    if (raw.empty() || (raw.front() != '[' && raw.front() != '{')) {
+    if (raw.size() < 2 || (raw.front() != '[' && raw.front() != '{')) {
         return YamlError{YamlErrorCode::UnexpectedToken, {line, column, offset},
                          "flow collection missing opening bracket"};
     }
     const bool isSeq = (raw.front() == '[');
+    const char expectedClose = isSeq ? ']' : '}';
+    // Defensive: scanner's readFlowCollection already guarantees a matching
+    // close, but a mismatched close (e.g. "[a}") reaches here as a truncated
+    // raw — reject rather than silently stripping a wrong close.
+    if (raw.back() != expectedClose) {
+        return YamlError{YamlErrorCode::UnclosedFlow, {line, column, offset},
+                         isSeq ? "flow sequence missing closing ']'"
+                               : "flow map missing closing '}'"};
+    }
     // Strip outer brackets/braces.
     std::string_view inner = raw.substr(1, raw.size() - 2);
 
@@ -246,6 +255,18 @@ namespace detail {
     std::size_t i = 0;
     auto root = detail::parseBlock(*tokens, i);
     if (!root) return root.error();
+
+    // A well-formed document has exactly one root block. If parseBlock
+    // returned before consuming everything, the remaining tokens were a
+    // same-indent switch of container type (map→seq or seq→map) that the
+    // block parser bailed on — that's silently dropped data. Reject it.
+    if (i < tokens->size() && (*tokens)[i].type != TokenType::EndOfInput) {
+        const Token& t = (*tokens)[i];
+        return YamlError{YamlErrorCode::UnexpectedToken,
+                         {t.line, t.column, t.offset},
+                         "unexpected token after document root (mixed map/seq "
+                         "at the same indent is not a valid single document)"};
+    }
 
     return YamlDoc(std::move(*root));
 }
