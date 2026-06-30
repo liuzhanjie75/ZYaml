@@ -88,7 +88,7 @@ public:
                 tokens.push_back(t);
                 // Optional inline value on the same line.
                 if (!atEnd() && peek() != '\n' && peek() != '\r') {
-                    std::string scalar = readPlainScalar();
+                    std::string scalar = readScalarValue();
                     skipSpaces();
                     if (peek() == ':') {
                         advance();
@@ -96,7 +96,7 @@ public:
                         tokens.push_back(me);
                         skipSpaces();
                         if (!atEnd() && peek() != '\n' && peek() != '\r') {
-                            std::string val = readPlainScalar();
+                            std::string val = readScalarValue();
                             if (!val.empty()) {
                                 Token v{TokenType::Scalar, std::move(val), line_, column_, pos_, *inlineIndent};
                                 tokens.push_back(v);
@@ -124,7 +124,7 @@ public:
                 inlineIndent.reset();
                 continue;
             }
-            std::string scalar = readPlainScalar();
+            std::string scalar = readScalarValue();
             skipSpaces();
             if (peek() == ':') {
                 advance();
@@ -141,7 +141,7 @@ public:
                                 .style = vstyle};
                         tokens.push_back(v);
                     } else {
-                        std::string val = readPlainScalar();
+                        std::string val = readScalarValue();
                         if (!val.empty()) {
                             Token v{TokenType::Scalar, std::move(val), line_, column_, pos_, indent};
                             tokens.push_back(v);
@@ -227,6 +227,57 @@ private:
         std::string s(source_.substr(start, pos_ - start));
         while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
         return s;
+    }
+
+    // Read a quoted scalar starting at the current '"' or '\''. Returns the
+    // decoded content (escapes processed). Advances past the closing quote.
+    // Double-quoted honors \n \t \\ \" \' \0. Single-quoted uses '' for '.
+    [[nodiscard]] std::string readQuoted() {
+        const char quote = peek();
+        advance();  // consume opening quote
+        std::string out;
+        while (!atEnd()) {
+            const char c = peek();
+            if (quote == '"') {
+                if (c == '"') { advance(); break; }
+                if (c == '\\' && !atEndAfter(1)) {
+                    advance();
+                    const char e = peek();
+                    switch (e) {
+                        case 'n': out += '\n'; break;
+                        case 't': out += '\t'; break;
+                        case 'r': out += '\r'; break;
+                        case '\\': out += '\\'; break;
+                        case '"': out += '"'; break;
+                        case '\'': out += '\''; break;
+                        case '0': out += '\0'; break;
+                        default: out += e; break;  // unknown escape: literal
+                    }
+                    advance();
+                    continue;
+                }
+                out += c;
+                advance();
+            } else {
+                // single-quoted: '' is a literal '
+                if (c == '\'') {
+                    if (peekAt(1) == '\'') { out += '\''; advance(); advance(); continue; }
+                    advance();  // consume closing '
+                    break;
+                }
+                out += c;
+                advance();
+            }
+        }
+        return out;
+    }
+
+    // Read a scalar value: if it starts with a quote, readQuoted; else plain.
+    [[nodiscard]] std::string readScalarValue() {
+        if (peek() == '"' || peek() == '\'') {
+            return readQuoted();
+        }
+        return readPlainScalar();
     }
 
     // Read a complete flow collection starting at the current '[' or '{',
