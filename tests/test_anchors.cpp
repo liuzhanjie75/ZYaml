@@ -1,8 +1,9 @@
 // M8 test — anchors (&name) and aliases (*name).
 //
 // YAML anchors let a node be referenced by name later. An alias resolves to
-// the anchored node's value. Mutating through an alias affects the shared
-// target. Unknown/duplicate anchors are errors.
+// the anchored node's value (a deep copy at parse time — mutation through
+// an alias does NOT propagate back to the original). Unknown/duplicate
+// anchors are errors.
 
 #include <iostream>
 #include <string>
