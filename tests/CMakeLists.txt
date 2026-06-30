@@ -23,3 +23,13 @@ if(MSVC)
 endif()
 
 add_test(NAME zyaml_parser COMMAND test_parser)
+
+add_executable(test_sequence test_sequence.cpp)
+target_link_libraries(test_sequence PRIVATE ZYaml::ZYaml)
+set_target_properties(test_sequence PROPERTIES CXX_SCAN_FOR_MODULES ON)
+target_compile_features(test_sequence PRIVATE cxx_std_23)
+if(MSVC)
+    target_compile_options(test_sequence PRIVATE /utf-8 /W4 /WX /Zc:preprocessor /permissive-)
+endif()
+
+add_test(NAME zyaml_sequence COMMAND test_sequence)

@@ -56,6 +56,13 @@ public:
         return n;
     }
 
+    [[nodiscard]] static Node makeSequence() {
+        Node n;
+        n.type_ = NodeType::Sequence;
+        n.seq_ = std::make_shared<SeqStorage>();
+        return n;
+    }
+
     [[nodiscard]] NodeType type() const noexcept { return type_; }
     [[nodiscard]] bool isNull() const noexcept { return type_ == NodeType::Null; }
     [[nodiscard]] bool isScalar() const noexcept { return type_ == NodeType::Scalar; }
@@ -103,7 +110,7 @@ public:
     // ── Map access ──────────────────────────────────────────────
     [[nodiscard]] std::size_t size() const noexcept {
         if (type_ == NodeType::Map && map_) return map_->entries.size();
-        // M1: no sequence support yet. Returns 0 for non-maps.
+        if (type_ == NodeType::Sequence && seq_) return seq_->entries.size();
         return 0;
     }
 
@@ -164,6 +171,63 @@ public:
         return MapItemsView(nullptr);
     }
 
+    // ── Sequence access ─────────────────────────────────────────
+    // Index access. Grows the sequence with Null nodes if i is past the end.
+    Node& operator[](std::size_t i) {
+        ensureSequence();
+        if (i >= seq_->entries.size()) {
+            seq_->entries.resize(i + 1);
+        }
+        return seq_->entries[i];
+    }
+
+    const Node& operator[](std::size_t i) const {
+        // Returns a static null node if out of range (read-only safety).
+        static const Node nullNode;
+        if (type_ != NodeType::Sequence || !seq_ || i >= seq_->entries.size()) {
+            return nullNode;
+        }
+        return seq_->entries[i];
+    }
+
+    // Range view over sequence elements (insertion order).
+    class SeqElementsView {
+    public:
+        explicit SeqElementsView(const std::vector<Node>* entries) : entries_(entries) {}
+        struct Iterator {
+            typename std::vector<Node>::const_iterator it;
+            const Node& operator*() const { return *it; }
+            Iterator& operator++() { ++it; return *this; }
+            bool operator!=(const Iterator& other) const { return it != other.it; }
+        };
+        [[nodiscard]] Iterator begin() const {
+            return {entries_ ? entries_->begin() : decltype(entries_->begin()){}};
+        }
+        [[nodiscard]] Iterator end() const {
+            return {entries_ ? entries_->end() : decltype(entries_->end()){}};
+        }
+    private:
+        const std::vector<Node>* entries_;
+    };
+
+    [[nodiscard]] SeqElementsView elements() const noexcept {
+        if (type_ == NodeType::Sequence && seq_) {
+            return SeqElementsView(&seq_->entries);
+        }
+        return SeqElementsView(nullptr);
+    }
+
+    // Internal: used by the parser to append a sequence element.
+    void appendSeqElement(Node value) {
+        ensureSequence();
+        seq_->entries.push_back(std::move(value));
+    }
+
+    void push(Node value) {
+        ensureSequence();
+        seq_->entries.push_back(std::move(value));
+    }
+
     // Internal: used by the parser to append a map entry.
     void appendMapEntry(std::string key, Node value) {
         ensureMap();
@@ -184,6 +248,15 @@ private:
             map_ = std::make_shared<MapStorage>();
         } else if (!map_) {
             map_ = std::make_shared<MapStorage>();
+        }
+    }
+
+    void ensureSequence() {
+        if (type_ != NodeType::Sequence) {
+            type_ = NodeType::Sequence;
+            seq_ = std::make_shared<SeqStorage>();
+        } else if (!seq_) {
+            seq_ = std::make_shared<SeqStorage>();
         }
     }
 
