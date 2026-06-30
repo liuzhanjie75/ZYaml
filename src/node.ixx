@@ -84,6 +84,7 @@ public:
         n.type_ = type_;
         n.scalar_ = scalar_;
         n.comments_ = comments_;
+        n.tag_ = tag_;
         if (map_) {
             n.map_ = std::make_shared<MapStorage>();
             n.map_->entries.reserve(map_->entries.size());
@@ -155,6 +156,10 @@ public:
     // them here). Returned by const ref so callers can read pre/inline.
     [[nodiscard]] const Comments& comments() const noexcept { return comments_; }
     Comments& mutableComments() noexcept { return comments_; }
+
+    // YAML tag (e.g. "!str", "!!int"). Preserved from parse; not interpreted.
+    [[nodiscard]] const std::optional<std::string>& tag() const noexcept { return tag_; }
+    void setTag(std::string t) { tag_ = std::move(t); }
 
     // Typed conversion. Returns Result<T>; never throws.
     // M1: int, long long, std::string. M4: bool, float, double.
@@ -335,9 +340,17 @@ public:
         seq_->entries.push_back(std::move(value));
     }
 
-    // Internal: used by the parser to append a map entry.
+    // Internal: used by the parser to append a map entry. If the key already
+    // exists (from a merge or duplicate), the later value replaces it —
+    // matching YAML's "last key wins" and "explicit overrides merge" rules.
     void appendMapEntry(std::string key, Node value) {
         ensureMap();
+        for (auto& [k, v] : map_->entries) {
+            if (k == key) {
+                v = std::move(value);
+                return;
+            }
+        }
         map_->entries.emplace_back(std::move(key), std::move(value));
     }
 
@@ -372,6 +385,7 @@ private:
     std::shared_ptr<MapStorage> map_;
     std::shared_ptr<SeqStorage> seq_;
     Comments comments_;
+    std::optional<std::string> tag_;  // YAML tag like "!str" — preserved but not interpreted
 };
 
 } // namespace zyaml

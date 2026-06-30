@@ -38,6 +38,7 @@ enum class TokenType {
     Comment,
     Anchor,  // &name — text is the anchor name (without &)
     Alias,   // *name — text is the anchor name (without *)
+    Tag,     // !tag — text is the tag (without !)
     EndOfInput,
 };
 
@@ -83,10 +84,10 @@ public:
     if (!_r_##name) return _r_##name.error(); \
     std::string name = std::move(*_r_##name)
 
-// ZE_EMIT_ANCHOR_ALIAS: at a value position, if the next char is '&' or '*',
-// emit an Anchor/Alias token and skip spaces. Returns true if the line ended
-// (no inline value follows — caller should skip to next iteration). The
-// caller checks the return and continues the loop.
+// ZE_EMIT_ANCHOR_ALIAS: at a value position, if the next char is '&', '*',
+// or '!', emit an Anchor/Alias/Tag token and skip spaces. Returns true if
+// the line ended (no inline value follows — caller should skip to next
+// iteration). The caller checks the return and continues the loop.
 #define ZE_EMIT_ANCHOR_ALIAS(tokIndent, _didContinue) \
     _didContinue = false; \
     if (peek() == '&' || peek() == '*') { \
@@ -94,6 +95,16 @@ public:
         Token _at{(_aa.first ? TokenType::Alias : TokenType::Anchor), \
                   std::move(_aa.second), line_, column_, pos_, (tokIndent)}; \
         tokens.push_back(_at); \
+        skipSpaces(); \
+        if (atEnd() || peek() == '\n' || peek() == '\r') { \
+            emitTrailingComment(tokens, (tokIndent)); \
+            inlineIndent.reset(); \
+            _didContinue = true; \
+        } \
+    } else if (peek() == '!') { \
+        std::string _tg = readTag(); \
+        Token _tt{TokenType::Tag, std::move(_tg), line_, column_, pos_, (tokIndent)}; \
+        tokens.push_back(_tt); \
         skipSpaces(); \
         if (atEnd() || peek() == '\n' || peek() == '\r') { \
             emitTrailingComment(tokens, (tokIndent)); \
@@ -308,6 +319,22 @@ private:
             advance();
         }
         return {isAlias, std::string(source_.substr(start, pos_ - start))};
+    }
+
+    // Read a tag (!name). Caller positioned at '!'. Returns the tag text
+    // (without the leading '!'). Advances past the tag name + any spaces.
+    [[nodiscard]] std::string readTag() {
+        advance();  // consume '!'
+        // Handle !!shorthand (double bang) — keep both bangs in the text.
+        std::size_t start = pos_ - 1;  // include the '!'
+        if (peek() == '!') advance();  // second '!'
+        while (!atEnd()) {
+            const char c = peek();
+            if (c == ':' || c == ',' || c == ']' || c == '}' || c == '\n' ||
+                c == '\r' || c == ' ' || c == '\t' || c == '#') break;
+            advance();
+        }
+        return std::string(source_.substr(start, pos_ - start));
     }
 
     [[nodiscard]] std::string readPlainScalar() {

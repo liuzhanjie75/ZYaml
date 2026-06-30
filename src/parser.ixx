@@ -79,6 +79,18 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
     }
     const Token& t = tokens[i];
 
+    // Tag: !name before a value. Record the tag, then parse the value
+    // that follows and attach the tag to it.
+    if (t.type == TokenType::Tag) {
+        std::string tagName = t.text;
+        i++;  // consume Tag
+        auto result = parseValue(tokens, i, indent, anchors);
+        if (!result) return result.error();
+        Node value = std::move(*result);
+        value.setTag(tagName);
+        return value;
+    }
+
     // Anchor: &name before a value. Register, then parse the value.
     if (t.type == TokenType::Anchor) {
         std::string name = t.text;
@@ -317,7 +329,19 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
             auto value = parseValue(tokens, i, t.indent, anchors);
             if (!value) return value.error();
             finalizeValue(*value);
-            container.appendMapEntry(std::move(key), std::move(*value));
+
+            // Merge key: "<<: *anchor" splices the referenced map's entries
+            // into this map WITHOUT overwriting keys already set explicitly.
+            if (key == "<<" && value->isMap()) {
+                for (const auto& item : value->items()) {
+                    if (container.find(item.key) == nullptr) {
+                        container.appendMapEntry(std::string(item.key),
+                                                 item.value.clone());
+                    }
+                }
+            } else {
+                container.appendMapEntry(std::move(key), std::move(*value));
+            }
             continue;
         }
 
