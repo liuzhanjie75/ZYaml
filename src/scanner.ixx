@@ -33,7 +33,8 @@ enum class TokenType {
     Scalar,
     MapEntry,
     SeqEntry,
-    FlowCollection,  // a complete [..] or {..} group, raw text in `text`
+    FlowCollection,
+    Comment,  // a # comment line or trailing # comment; text includes the '#'
     EndOfInput,
 };
 
@@ -47,12 +48,14 @@ enum class TokenStyle {
 struct Token {
     TokenType type = TokenType::EndOfInput;
     std::string text;     // scalar text; key text for MapEntry; empty for SeqEntry;
-                          // raw "[...]" / "{...}" for FlowCollection
+                          // raw "[...]" / "{...}" for FlowCollection;
+                          // "# ..." (with leading #) for Comment
     std::size_t line = 1;
     std::size_t column = 1;
     std::size_t offset = 0;
     std::size_t indent = 0;
-    TokenStyle style = TokenStyle::Plain;  // trailing so aggregate init w/o it defaults to Plain
+    TokenStyle style = TokenStyle::Plain;
+    bool isInline = false;  // Comment: true if trailing on a value's own line
 };
 
 class Scanner {
@@ -83,6 +86,18 @@ public:
             std::size_t indent = currentLineIndent();
             if (inlineIndent) indent = *inlineIndent;
             skipSpaces();
+            // Block comment line (a '#' at the start of the content column).
+            // Emitted as a Comment token; the parser binds it to the next
+            // node's `pre` list.
+            if (peek() == '#') {
+                std::string c = readComment();
+                Token t{TokenType::Comment, std::move(c), line_, column_, pos_, indent};
+                t.isInline = false;
+                tokens.push_back(t);
+                skipToEndOfLine();
+                inlineIndent.reset();
+                continue;
+            }
             // Block sequence entry: "- " (or "-" at EOL).
             if (peek() == '-' && (peekAt(1) == ' ' || peekAt(1) == '\t' ||
                                   peekAt(1) == '\n' || peekAt(1) == '\r' || atEndAfter(1))) {
@@ -112,7 +127,7 @@ public:
                         tokens.push_back(v);
                     }
                 }
-                skipToEndOfLine();
+                emitTrailingComment(tokens, indent);
                 inlineIndent.reset();
                 continue;
             }
@@ -153,11 +168,11 @@ public:
                         }
                     }
                 }
-                skipToEndOfLine();
+                emitTrailingComment(tokens, indent);
             } else {
                 Token t{TokenType::Scalar, std::move(scalar), line_, column_, pos_, indent};
                 tokens.push_back(t);
-                skipToEndOfLine();
+                emitTrailingComment(tokens, indent);
             }
             inlineIndent.reset();
         }
@@ -193,6 +208,9 @@ private:
         while (!atEnd() && (peek() == ' ' || peek() == '\t')) advance();
     }
 
+    // Skip truly blank lines (empty or whitespace-only). Comment lines and
+    // content lines are left for the caller to handle — M6 emits Comment
+    // tokens so the parser can bind them to nodes.
     void skipBlankLines() {
         while (!atEnd()) {
             std::size_t save = pos_;
@@ -201,7 +219,7 @@ private:
             if (atEnd()) return;
             if (peek() == '\n') { advance(); continue; }
             if (peek() == '\r' && peekAt(1) == '\n') { advance(); advance(); continue; }
-            if (peek() == '#') { skipToEndOfLine(); continue; }
+            // Non-blank content (including '#') — restore and stop.
             pos_ = save; line_ = saveline; column_ = savecol;
             return;
         }
@@ -221,6 +239,31 @@ private:
         std::size_t indent = 0;
         while (i < source_.size() && source_[i] == ' ') { ++indent; ++i; }
         return indent;
+    }
+
+    // Read a comment from '#' to end of line. Returns text including the '#'.
+    // Caller has already positioned at '#'; this consumes through newline.
+    [[nodiscard]] std::string readComment() {
+        std::size_t start = pos_;
+        while (!atEnd() && peek() != '\n' && peek() != '\r') advance();
+        std::string s(source_.substr(start, pos_ - start));
+        // Trim trailing spaces/tabs (the comment text itself, not the newline).
+        while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+        return s;
+    }
+
+    // After a value token, skip spaces; if a '#' follows, emit it as an
+    // inline Comment (bound to the just-emitted value node), then consume
+    // the rest of the line. If no '#', just consume to end of line.
+    void emitTrailingComment(std::vector<Token>& tokens, std::size_t indent) {
+        skipSpaces();
+        if (peek() == '#') {
+            std::string c = readComment();
+            Token t{TokenType::Comment, std::move(c), line_, column_, pos_, indent};
+            t.isInline = true;
+            tokens.push_back(t);
+        }
+        skipToEndOfLine();
     }
 
     [[nodiscard]] std::string readPlainScalar() {

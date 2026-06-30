@@ -126,43 +126,59 @@ namespace detail {
 // At the top level, blockIndent is taken from the first token's indent.
 [[nodiscard]] Result<Node> parseBlock(const std::vector<Token>& tokens,
                                        std::size_t& i) {
-    // Determine this block's indent from the first token.
+    // Skip leading block comments — they bind to the first entry's `pre`.
+    std::vector<std::string> currentPre;
+    while (i < tokens.size() && tokens[i].type == TokenType::Comment
+           && !tokens[i].isInline) {
+        currentPre.push_back(tokens[i].text);
+        i++;
+    }
     if (i >= tokens.size() || tokens[i].type == TokenType::EndOfInput) {
         return Node::makeNull();
     }
     const std::size_t blockIndent = tokens[i].indent;
-
-    // Decide container type by the first token kind.
     const TokenType firstKind = tokens[i].type;
     Node container = (firstKind == TokenType::SeqEntry)
                           ? Node::makeSequence()
                           : Node::makeMap();
 
+    // Helper: attach `currentPre` and any following inline Comment to a
+    // value node, then clear currentPre. Used after building each entry's
+    // value so comments travel with the value, not the container.
+    auto finalizeValue = [&](Node& value) {
+        value.mutableComments().pre = std::move(currentPre);
+        currentPre.clear();
+        if (i < tokens.size() && tokens[i].type == TokenType::Comment
+            && tokens[i].isInline) {
+            value.mutableComments().inline_ = tokens[i].text;
+            i++;
+        }
+    };
+
     while (i < tokens.size() && tokens[i].type != TokenType::EndOfInput) {
         const Token& t = tokens[i];
-        // A token at indent < blockIndent ends this block (return to parent).
-        // A token at indent > blockIndent shouldn't appear here (parseBlock
-        // is always entered at the first token of a block); but guard anyway.
+        // A block comment at this indent is a `pre` for the next entry.
+        if (t.type == TokenType::Comment && !t.isInline) {
+            if (t.indent < blockIndent) break;
+            currentPre.push_back(t.text);
+            i++;
+            continue;
+        }
         if (t.indent < blockIndent) break;
         if (t.indent > blockIndent) {
-            // Unexpected deeper indent without a container-opening token —
-            // treat as a parse error rather than silently misnesting.
             return YamlError{YamlErrorCode::BadIndent,
                              {t.line, t.column, t.offset},
                              "unexpected deeper indentation"};
         }
 
         if (t.type == TokenType::SeqEntry) {
-            if (firstKind != TokenType::SeqEntry) {
-                // Switched from map to seq at same indent — end this map block.
-                break;
-            }
+            if (firstKind != TokenType::SeqEntry) break;
             i++;  // consume SeqEntry
-            // Inline value?
+            Node value;
             if (i < tokens.size() && tokens[i].type == TokenType::Scalar
                 && tokens[i].indent == t.indent) {
-                Node value = Node::makeScalarOrNull(tokens[i].text);
-                i++;  // consume the inline scalar
+                value = Node::makeScalarOrNull(tokens[i].text);
+                i++;
                 if (i < tokens.size() && tokens[i].type != TokenType::EndOfInput
                     && tokens[i].indent > t.indent
                     && (tokens[i].type == TokenType::MapEntry
@@ -171,68 +187,62 @@ namespace detail {
                     if (!child) return child.error();
                     value = std::move(*child);
                 }
-                container.push(std::move(value));
             } else if (i < tokens.size() && tokens[i].type == TokenType::FlowCollection
                        && tokens[i].indent == t.indent) {
                 auto node = parseFlowCollection(tokens[i].text, tokens[i].line,
                                                 tokens[i].column, tokens[i].offset);
                 if (!node) return node.error();
                 i++;
-                container.push(std::move(*node));
+                value = std::move(*node);
+            } else if (i < tokens.size() && tokens[i].type != TokenType::EndOfInput
+                       && tokens[i].indent > t.indent) {
+                auto child = parseBlock(tokens, i);
+                if (!child) return child.error();
+                value = std::move(*child);
             } else {
-                // No inline value — the element is a nested block (or null).
-                if (i < tokens.size() && tokens[i].type != TokenType::EndOfInput
-                    && tokens[i].indent > t.indent) {
-                    auto child = parseBlock(tokens, i);
-                    if (!child) return child.error();
-                    container.push(std::move(*child));
-                } else {
-                    container.push(Node::makeNull());
-                }
+                value = Node::makeNull();
             }
+            finalizeValue(value);
+            container.push(std::move(value));
             continue;
         }
 
         if (t.type == TokenType::MapEntry) {
-            if (firstKind != TokenType::MapEntry) {
-                break;  // switched from seq to map at same indent
-            }
+            if (firstKind != TokenType::MapEntry) break;
             std::string key = t.text;
             i++;  // consume MapEntry
-            // Inline value on the same line?
+            Node value;
             if (i < tokens.size() && tokens[i].type == TokenType::Scalar
                 && tokens[i].indent == t.indent) {
-                Node value = Node::makeScalarOrNull(tokens[i].text);
+                value = Node::makeScalarOrNull(tokens[i].text);
                 i++;
-                container.appendMapEntry(std::move(key), std::move(value));
             } else if (i < tokens.size() && tokens[i].type == TokenType::FlowCollection
                        && tokens[i].indent == t.indent) {
                 auto node = parseFlowCollection(tokens[i].text, tokens[i].line,
                                                 tokens[i].column, tokens[i].offset);
                 if (!node) return node.error();
                 i++;
-                container.appendMapEntry(std::move(key), std::move(*node));
+                value = std::move(*node);
             } else if (i < tokens.size() && tokens[i].type != TokenType::EndOfInput
                        && tokens[i].indent > t.indent) {
-                // Nested block value.
                 auto child = parseBlock(tokens, i);
                 if (!child) return child.error();
-                container.appendMapEntry(std::move(key), std::move(*child));
+                value = std::move(*child);
             } else {
-                container.appendMapEntry(std::move(key), Node::makeNull());
+                value = Node::makeNull();
             }
+            finalizeValue(value);
+            container.appendMapEntry(std::move(key), std::move(value));
             continue;
         }
 
         if (t.type == TokenType::Scalar) {
-            // A standalone scalar document (no map/seq wrapper). Return it
-            // directly as the root — only valid at the top level.
             Node scalar = Node::makeScalarOrNull(t.text);
             i++;
+            finalizeValue(scalar);
             return scalar;
         }
 
-        // Unexpected token type.
         return YamlError{YamlErrorCode::UnexpectedToken,
                          {t.line, t.column, t.offset},
                          "unexpected token in block"};

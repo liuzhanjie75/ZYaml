@@ -32,6 +32,17 @@ enum class NodeType {
     Map,
 };
 
+// Comment model: comments attached to a Node at parse time. `pre` holds
+// full comment lines preceding the node (one entry per line, including
+// the leading '#'). `inline_` holds the trailing "# ..." on the node's
+// own start line (None if absent). `post` (lines after, before the next
+// sibling) is reserved for a later refinement.
+struct Comments {
+    std::vector<std::string> pre;
+    std::optional<std::string> inline_;
+    std::vector<std::string> post;  // unused in M6; reserved
+};
+
 // Bool conversion (YAML 1.2 core + 1.1 spellings). Defined before Node
 // so the as<bool>() instantiation point sees it. Accepts true/false/yes/
 // no/on/off/y/n (case-insensitive). Non-bool strings return an error —
@@ -72,6 +83,7 @@ public:
         Node n;
         n.type_ = type_;
         n.scalar_ = scalar_;
+        n.comments_ = comments_;
         if (map_) {
             n.map_ = std::make_shared<MapStorage>();
             n.map_->entries.reserve(map_->entries.size());
@@ -137,6 +149,12 @@ public:
     [[nodiscard]] std::string_view asString() const noexcept {
         return scalar_;
     }
+
+    // ── Comments ────────────────────────────────────────────────
+    // Attached at parse time (scanner emits Comment tokens; parser binds
+    // them here). Returned by const ref so callers can read pre/inline.
+    [[nodiscard]] const Comments& comments() const noexcept { return comments_; }
+    Comments& mutableComments() noexcept { return comments_; }
 
     // Typed conversion. Returns Result<T>; never throws.
     // M1: int, long long, std::string. M4: bool, float, double.
@@ -353,6 +371,7 @@ private:
     std::string scalar_;
     std::shared_ptr<MapStorage> map_;
     std::shared_ptr<SeqStorage> seq_;
+    Comments comments_;
 };
 
 } // namespace zyaml
