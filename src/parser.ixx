@@ -76,7 +76,7 @@ namespace detail {
                 while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) item.remove_prefix(1);
                 while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) item.remove_suffix(1);
                 if (!item.empty()) {
-                    seq.push(Node::makeScalar(std::string(item)));
+                    seq.push(Node::makeScalarOrNull(std::string(item)));
                 }
                 segStart = k + 1;
             }
@@ -103,7 +103,7 @@ namespace detail {
                     while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.remove_prefix(1);
                     while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.remove_suffix(1);
                     map.appendMapEntry(std::string(key),
-                                        Node::makeScalar(std::string(val)));
+                                        Node::makeScalarOrNull(std::string(val)));
                 }
                 segStart = k + 1;
             }
@@ -152,7 +152,7 @@ namespace detail {
             // Inline value?
             if (i < tokens.size() && tokens[i].type == TokenType::Scalar
                 && tokens[i].indent == t.indent) {
-                Node value = Node::makeScalar(tokens[i].text);
+                Node value = Node::makeScalarOrNull(tokens[i].text);
                 i++;  // consume the inline scalar
                 if (i < tokens.size() && tokens[i].type != TokenType::EndOfInput
                     && tokens[i].indent > t.indent
@@ -193,7 +193,7 @@ namespace detail {
             // Inline value on the same line?
             if (i < tokens.size() && tokens[i].type == TokenType::Scalar
                 && tokens[i].indent == t.indent) {
-                Node value = Node::makeScalar(tokens[i].text);
+                Node value = Node::makeScalarOrNull(tokens[i].text);
                 i++;
                 container.appendMapEntry(std::move(key), std::move(value));
             } else if (i < tokens.size() && tokens[i].type == TokenType::FlowCollection
@@ -218,7 +218,7 @@ namespace detail {
         if (t.type == TokenType::Scalar) {
             // A standalone scalar document (no map/seq wrapper). Return it
             // directly as the root — only valid at the top level.
-            Node scalar = Node::makeScalar(t.text);
+            Node scalar = Node::makeScalarOrNull(t.text);
             i++;
             return scalar;
         }

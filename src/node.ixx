@@ -32,6 +32,26 @@ enum class NodeType {
     Map,
 };
 
+// Bool conversion (YAML 1.2 core + 1.1 spellings). Defined before Node
+// so the as<bool>() instantiation point sees it. Accepts true/false/yes/
+// no/on/off/y/n (case-insensitive). Non-bool strings return an error —
+// they do NOT silently coerce to false (the legacy library's bug).
+[[nodiscard]] inline Result<bool> convertBool(const std::string& s) {
+    auto eq = [&](const char* lit) {
+        std::size_t i = 0;
+        for (; i < s.size() && lit[i]; ++i) {
+            char c = s[i];
+            if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            if (c != lit[i]) return false;
+        }
+        return i == s.size() && lit[i] == '\0';
+    };
+    if (eq("true") || eq("yes") || eq("on") || eq("y")) return true;
+    if (eq("false") || eq("no") || eq("off") || eq("n")) return false;
+    return YamlError{YamlErrorCode::ScalarConversion, {},
+                     "scalar is not a bool: \"" + s + "\""};
+}
+
 class Node {
 public:
     Node() = default;
@@ -47,6 +67,16 @@ public:
         n.type_ = NodeType::Scalar;
         n.scalar_ = std::move(value);
         return n;
+    }
+
+    // Parse-time helper: a plain scalar whose text is a null spelling
+    // (null/Null/NULL/~ or empty) becomes a Null node rather than a Scalar.
+    [[nodiscard]] static Node makeScalarOrNull(std::string value) {
+        if (value.empty() || value == "null" || value == "Null" ||
+            value == "NULL" || value == "~") {
+            return makeNull();
+        }
+        return makeScalar(std::move(value));
     }
 
     [[nodiscard]] static Node makeMap() {
@@ -76,7 +106,7 @@ public:
     }
 
     // Typed conversion. Returns Result<T>; never throws.
-    // M1: int, long long, std::string. M4 adds bool/float/double.
+    // M1: int, long long, std::string. M4: bool, float, double.
     template <class T>
     [[nodiscard]] Result<T> as() const {
         if (type_ != NodeType::Scalar) {
@@ -84,9 +114,17 @@ public:
                 YamlErrorCode::TypeMismatch, {}, "as<T>() on non-scalar node"};
         }
         if constexpr (std::is_same_v<T, int>) {
+            // std::from_chars accepts leading '-' but MSVC's int overload
+            // rejects leading '+'. Strip it so "+7" parses as 7.
+            std::string stripped;
+            const std::string* parseStr = &scalar_;
+            if (!scalar_.empty() && scalar_[0] == '+') {
+                stripped = scalar_.substr(1);
+                parseStr = &stripped;
+            }
             int v = 0;
-            auto [ptr, ec] = std::from_chars(scalar_.data(), scalar_.data() + scalar_.size(), v);
-            if (ec != std::errc{} || ptr != scalar_.data() + scalar_.size()) {
+            auto [ptr, ec] = std::from_chars(parseStr->data(), parseStr->data() + parseStr->size(), v);
+            if (ec != std::errc{} || ptr != parseStr->data() + parseStr->size()) {
                 return YamlError{YamlErrorCode::ScalarConversion, {},
                                   "scalar is not an int: \"" + scalar_ + "\""};
             }
@@ -99,6 +137,24 @@ public:
                                   "scalar is not an integer: \"" + scalar_ + "\""};
             }
             return v;
+        } else if constexpr (std::is_same_v<T, float>) {
+            float v = 0.0f;
+            auto [ptr, ec] = std::from_chars(scalar_.data(), scalar_.data() + scalar_.size(), v);
+            if (ec != std::errc{} || ptr != scalar_.data() + scalar_.size()) {
+                return YamlError{YamlErrorCode::ScalarConversion, {},
+                                  "scalar is not a float: \"" + scalar_ + "\""};
+            }
+            return v;
+        } else if constexpr (std::is_same_v<T, double>) {
+            double v = 0.0;
+            auto [ptr, ec] = std::from_chars(scalar_.data(), scalar_.data() + scalar_.size(), v);
+            if (ec != std::errc{} || ptr != scalar_.data() + scalar_.size()) {
+                return YamlError{YamlErrorCode::ScalarConversion, {},
+                                  "scalar is not a double: \"" + scalar_ + "\""};
+            }
+            return v;
+        } else if constexpr (std::is_same_v<T, bool>) {
+            return convertBool(scalar_);
         } else if constexpr (std::is_same_v<T, std::string>) {
             return scalar_;
         } else {
