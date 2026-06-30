@@ -5,8 +5,10 @@
 // exposes multiDocs().
 
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 import ZYaml;
 
@@ -118,18 +120,16 @@ void test_multi_document() {
         "b: 2\n"
         "---\n"
         "c: 3\n";
-    auto docs = zyaml::parseMultiDoc(yaml);
-    CHECK(docs.has_value(), "multi-doc parse should succeed");
-    if (!docs) return;
-    CHECK_EQ(docs->size(), 3u, "3 documents");
-    if (docs->size() < 3) return;
-    // Each doc should have one key.
-    const auto& d0 = (*docs)[0].root();
-    const auto& d1 = (*docs)[1].root();
-    const auto& d2 = (*docs)[2].root();
-    CHECK(d0.find("a") != nullptr, "doc 0 has 'a'");
-    CHECK(d1.find("b") != nullptr, "doc 1 has 'b'");
-    CHECK(d2.find("c") != nullptr, "doc 2 has 'c'");
+    std::vector<zyaml::YamlDoc> docs;
+    auto err = zyaml::parseMultiDoc(yaml, docs);
+    if (err) std::cerr << "  [multi] error: " << err->format() << "\n";
+    CHECK(!err.has_value(), "multi-doc parse should succeed");
+    if (err) return;
+    CHECK_EQ(docs.size(), 3u, "3 documents");
+    if (docs.size() < 3) return;
+    CHECK(docs[0].root().find("a") != nullptr, "doc 0 has 'a'");
+    CHECK(docs[1].root().find("b") != nullptr, "doc 1 has 'b'");
+    CHECK(docs[2].root().find("c") != nullptr, "doc 2 has 'c'");
 }
 
 void test_multi_doc_with_end_markers() {
@@ -139,10 +139,11 @@ void test_multi_doc_with_end_markers() {
         "---\n"
         "b: 2\n"
         "...\n";
-    auto docs = zyaml::parseMultiDoc(yaml);
-    CHECK(docs.has_value(), "multi-doc with end markers parse should succeed");
-    if (!docs) return;
-    CHECK_EQ(docs->size(), 2u, "2 documents");
+    std::vector<zyaml::YamlDoc> docs;
+    auto err = zyaml::parseMultiDoc(yaml, docs);
+    CHECK(!err.has_value(), "multi-doc with end markers parse should succeed");
+    if (err) return;
+    CHECK_EQ(docs.size(), 2u, "2 documents");
 }
 
 } // namespace

@@ -22,6 +22,7 @@ module;
 #include <cstddef>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -39,6 +40,10 @@ class YamlDoc {
 public:
     YamlDoc() = default;
     explicit YamlDoc(Node root) : root_(std::move(root)) {}
+    YamlDoc(YamlDoc&&) = default;
+    YamlDoc& operator=(YamlDoc&&) = default;
+    YamlDoc(const YamlDoc&) = delete;
+    YamlDoc& operator=(const YamlDoc&) = delete;
 
     [[nodiscard]] const Node& root() const noexcept { return root_; }
     [[nodiscard]] Node& root() noexcept { return root_; }
@@ -91,37 +96,20 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
         return value;
     }
 
-    // Anchor: &name before a value. Register, then parse the value.
+    // Anchor: &name before a value. Register, then parse the value
+    // by recursing into parseValue (handles Scalar/Flow/nested uniformly).
     if (t.type == TokenType::Anchor) {
         std::string name = t.text;
         i++;  // consume Anchor
-        Node value;
-        if (i < tokens.size() && tokens[i].type == TokenType::Scalar
-            && tokens[i].indent == indent) {
-            value = Node::makeScalarOrNull(tokens[i].text);
-            i++;
-        } else if (i < tokens.size() && tokens[i].type == TokenType::FlowCollection
-                   && tokens[i].indent == indent) {
-            auto node = parseFlowCollection(tokens[i].text, tokens[i].line,
-                                            tokens[i].column, tokens[i].offset);
-            if (!node) return node.error();
-            i++;
-            value = std::move(*node);
-        } else if (i < tokens.size() && tokens[i].type != TokenType::EndOfInput
-                   && tokens[i].indent > indent) {
-            auto child = parseBlock(tokens, i, anchors);
-            if (!child) return child.error();
-            value = std::move(*child);
-        } else {
-            value = Node::makeNull();
-        }
+        auto result = parseValue(tokens, i, indent, anchors);
+        if (!result) return result.error();
         if (anchors.count(name)) {
             return YamlError{YamlErrorCode::DuplicateAnchor,
                              {t.line, t.column, t.offset},
                              "duplicate anchor: &" + name};
         }
-        anchors[name] = std::make_shared<Node>(value.clone());
-        return value;
+        anchors[name] = std::make_shared<Node>(result->clone());
+        return std::move(*result);
     }
 
     // Alias: *name — resolve from the anchor table.
@@ -154,8 +142,10 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
 
     // Nested block (deeper indent). Any non-EndOfInput token at a deeper
     // indent is a nested block — includes Scalar (standalone), MapEntry,
-    // SeqEntry, Anchor. parseBlock handles dispatching.
-    if (t.type != TokenType::EndOfInput && t.indent > indent) {
+    // SeqEntry, Anchor. parseBlock handles dispatching. DocStart ends the
+    // document — not a nested block.
+    if (t.type != TokenType::EndOfInput && t.type != TokenType::DocStart
+        && t.indent > indent) {
         auto child = parseBlock(tokens, i, anchors);
         if (!child) return child.error();
         return std::move(*child);
@@ -163,6 +153,44 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
 
     // No inline value, no nested block → null.
     return Node::makeNull();
+}
+
+// Strip surrounding quotes and process escapes from a flow-collection item
+// or key. Shared between the flow seq and flow map paths. Mirrors the
+// scanner's readQuoted escape set (minus multi-line concerns).
+[[nodiscard]] inline std::string stripFlowQuotes(std::string_view s) {
+    if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
+        std::string out;
+        for (std::size_t j = 1; j < s.size() - 1; ++j) {
+            if (s[j] == '\\' && j + 1 < s.size() - 1) {
+                ++j;
+                switch (s[j]) {
+                    case 'n': out += '\n'; break;
+                    case 't': out += '\t'; break;
+                    case 'r': out += '\r'; break;
+                    case '\\': out += '\\'; break;
+                    case '"': out += '"'; break;
+                    default: out += s[j]; break;
+                }
+            } else {
+                out += s[j];
+            }
+        }
+        return out;
+    }
+    if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') {
+        std::string out;
+        for (std::size_t j = 1; j < s.size() - 1; ++j) {
+            if (s[j] == '\'' && j + 1 < s.size() - 1 && s[j + 1] == '\'') {
+                out += '\'';
+                ++j;
+            } else {
+                out += s[j];
+            }
+        }
+        return out;
+    }
+    return std::string(s);
 }
 
 // Parse a flow collection's raw text (e.g. "[a, b, c]" or "{x: 1, y: 2}")
@@ -195,50 +223,32 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
         Node seq = Node::makeSequence();
         // Split on top-level commas.
         std::size_t segStart = 0;
-        auto stripQuotes = [](std::string_view s) -> std::string {
-            if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
-                // Double-quoted: process escapes (minimal).
-                std::string out;
-                for (std::size_t j = 1; j < s.size() - 1; ++j) {
-                    if (s[j] == '\\' && j + 1 < s.size() - 1) {
-                        ++j;
-                        switch (s[j]) {
-                            case 'n': out += '\n'; break;
-                            case 't': out += '\t'; break;
-                            case 'r': out += '\r'; break;
-                            case '\\': out += '\\'; break;
-                            case '"': out += '"'; break;
-                            default: out += s[j]; break;
-                        }
-                    } else {
-                        out += s[j];
-                    }
-                }
-                return out;
-            }
-            if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') {
-                // Single-quoted: '' → '
-                std::string out;
-                for (std::size_t j = 1; j < s.size() - 1; ++j) {
-                    if (s[j] == '\'' && j + 1 < s.size() - 1 && s[j + 1] == '\'') {
-                        out += '\'';
-                        ++j;
-                    } else {
-                        out += s[j];
-                    }
-                }
-                return out;
-            }
-            return std::string(s);
-        };
         for (std::size_t k = 0; k <= inner.size(); ++k) {
-            const bool atEndOrComma = (k == inner.size() || inner[k] == ',');
-            if (atEndOrComma) {
+            // Track bracket/brace depth so commas inside nested [..]/{..}
+            // don't split. Also respect quotes.
+            // (Simplified: we re-scan from segStart each comma check.)
+            if (k == inner.size() || (inner[k] == ',' && [&] {
+                int d = 0; char q = 0;
+                for (std::size_t j = segStart; j < k; ++j) {
+                    if (q) { if (inner[j] == q) q = 0; continue; }
+                    if (inner[j] == '"' || inner[j] == '\'') { q = inner[j]; continue; }
+                    if (inner[j] == '[' || inner[j] == '{') ++d;
+                    if (inner[j] == ']' || inner[j] == '}') --d;
+                }
+                return d == 0;
+            }())) {
                 std::string_view item = inner.substr(segStart, k - segStart);
                 while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) item.remove_prefix(1);
                 while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) item.remove_suffix(1);
                 if (!item.empty()) {
-                    seq.push(Node::makeScalarOrNull(stripQuotes(item)));
+                    // Nested flow collection?
+                    if (item.front() == '[' || item.front() == '{') {
+                        auto nested = parseFlowCollection(item, 0, 0, 0);
+                        if (!nested) return nested.error();
+                        seq.push(std::move(*nested));
+                    } else {
+                        seq.push(Node::makeScalarOrNull(stripFlowQuotes(item)));
+                    }
                 }
                 segStart = k + 1;
             }
@@ -264,8 +274,8 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
                     while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.remove_suffix(1);
                     while (!val.empty() && (val.front() == ' ' || val.front() == '\t')) val.remove_prefix(1);
                     while (!val.empty() && (val.back() == ' ' || val.back() == '\t')) val.remove_suffix(1);
-                    map.appendMapEntry(std::string(key),
-                                        Node::makeScalarOrNull(std::string(val)));
+                    map.appendMapEntry(stripFlowQuotes(key),
+                                        Node::makeScalarOrNull(stripFlowQuotes(val)));
                 }
                 segStart = k + 1;
             }
@@ -311,6 +321,8 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
 
     while (i < tokens.size() && tokens[i].type != TokenType::EndOfInput) {
         const Token& t = tokens[i];
+        // DocStart (---) ends this document's block.
+        if (t.type == TokenType::DocStart) break;
         // A block comment at this indent is a `pre` for the next entry.
         if (t.type == TokenType::Comment && !t.isInline) {
             if (t.indent < blockIndent) break;
@@ -408,6 +420,10 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
 
     std::size_t i = 0;
     detail::AnchorTable anchors;
+    // Skip leading DocStart (---) tokens — they're optional document markers.
+    while (i < tokens->size() && (*tokens)[i].type == TokenType::DocStart) {
+        i++;
+    }
     auto root = detail::parseBlock(*tokens, i, anchors);
     if (!root) return root.error();
 
@@ -429,60 +445,38 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
 // Split a multi-document stream on top-level --- markers and parse each
 // segment independently. ... (doc end) markers are skipped by the scanner.
 // Returns a vector of YamlDoc, one per document.
-[[nodiscard]] Result<std::vector<YamlDoc>> parseMultiDoc(std::string_view source) {
-    std::vector<YamlDoc> docs;
+// parseMultiDoc returns an error directly (or std::nullopt on success)
+// because Result<vector<YamlDoc>> can't use std::variant (variant requires
+// copyable T, and YamlDoc is move-only).
+[[nodiscard]] std::optional<YamlError> parseMultiDoc(std::string_view source,
+                                                      std::vector<YamlDoc>& docs) {
+    if (source.empty()) {
+        docs.push_back(YamlDoc(Node::makeNull()));
+        return std::nullopt;
+    }
 
-    // Split on lines that are exactly "---" (possibly with trailing spaces).
-    // We do a line-by-line scan rather than a naive string split to avoid
-    // splitting on "---" inside a block scalar.
-    std::vector<std::string> segments;
-    std::string current;
+    Scanner scanner(source);
+    auto tokens = scanner.scanAll();
+    if (!tokens) return tokens.error();
 
-    for (std::size_t k = 0; k < source.size(); ) {
-        // Check if this line starts with "---" at column 0.
-        if (k == 0 || source[k - 1] == '\n') {
-            // Count leading spaces (YAML allows --- at column 0 only for M11).
-            std::size_t sp = k;
-            while (sp < source.size() && source[sp] == ' ') ++sp;
-            if (sp + 2 < source.size() && source[sp] == '-' && source[sp + 1] == '-' &&
-                source[sp + 2] == '-') {
-                // Check if the rest of the line is just spaces/comment.
-                std::size_t rest = sp + 3;
-                while (rest < source.size() && source[rest] != '\n') {
-                    if (source[rest] != ' ' && source[rest] != '\t' && source[rest] != '#') break;
-                    ++rest;
-                }
-                if (rest >= source.size() || source[rest] == '\n') {
-                    // It's a doc separator.
-                    if (!current.empty()) {
-                        segments.push_back(std::move(current));
-                        current.clear();
-                    }
-                    // Skip to next line.
-                    k = rest;
-                    if (k < source.size() && source[k] == '\n') ++k;
-                    continue;
-                }
-            }
+    std::size_t i = 0;
+    while (i < tokens->size() && (*tokens)[i].type == TokenType::DocStart) {
+        i++;
+    }
+
+    while (i < tokens->size() && (*tokens)[i].type != TokenType::EndOfInput) {
+        detail::AnchorTable anchors;
+        auto root = detail::parseBlock(*tokens, i, anchors);
+        if (!root) return root.error();
+        docs.push_back(YamlDoc(std::move(*root)));
+        while (i < tokens->size() && (*tokens)[i].type == TokenType::DocStart) {
+            i++;
         }
-        current += source[k];
-        ++k;
     }
-    if (!current.empty()) {
-        segments.push_back(std::move(current));
+    if (docs.empty()) {
+        docs.push_back(YamlDoc(Node::makeNull()));
     }
-
-    // If no segments, treat the whole source as one doc.
-    if (segments.empty()) {
-        segments.push_back(std::string(source));
-    }
-
-    for (auto& seg : segments) {
-        auto doc = parse(seg);
-        if (!doc) return doc.error();
-        docs.push_back(std::move(*doc));
-    }
-    return docs;
+    return std::nullopt;
 }
 
 } // namespace zyaml

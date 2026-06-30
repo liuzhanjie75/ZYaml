@@ -340,6 +340,26 @@ public:
         seq_->entries.push_back(std::move(value));
     }
 
+    // Remove a map entry by key. Returns true if found and removed.
+    bool remove(std::string_view key) {
+        if (type_ != NodeType::Map || !map_) return false;
+        for (auto it = map_->entries.begin(); it != map_->entries.end(); ++it) {
+            if (it->first == key) {
+                map_->entries.erase(it);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Remove a sequence element by index. Returns true if in range.
+    bool removeAt(std::size_t index) {
+        if (type_ != NodeType::Sequence || !seq_) return false;
+        if (index >= seq_->entries.size()) return false;
+        seq_->entries.erase(seq_->entries.begin() + static_cast<ptrdiff_t>(index));
+        return true;
+    }
+
     // Internal: used by the parser to append a map entry. If the key already
     // exists (from a merge or duplicate), the later value replaces it —
     // matching YAML's "last key wins" and "explicit overrides merge" rules.

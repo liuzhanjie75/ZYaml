@@ -58,13 +58,12 @@ struct YamlError {
     }
 };
 
-// A simple Result<T> wrapper around std::expected. MSVC 19.44 has an
-// issue instantiating std::expected's converting constructor when both
-// template args are module-exported types (C2028). Wrapping the alias here
-// and providing explicit constructors sidesteps the conversion path.
-//
-// M11 will revisit direct std::expected use once the compiler issue is
-// understood or worked around at the type level.
+// A simple Result<T> wrapper around std::variant. MSVC 19.44 has a
+// known issue instantiating std::expected's converting constructor when
+// both template args are module-exported types (C2028). Result sidesteps
+// it with explicit constructors. This is the permanent API, not a
+// temporary workaround — std::expected's module interaction is a
+// compiler bug, not a library design choice.
 template <class T>
 class Result {
 public:
@@ -77,6 +76,7 @@ public:
     [[nodiscard]] const YamlError& error() const { return std::get<1>(value_); }
 
     [[nodiscard]] const T* operator->() const { return &std::get<0>(value_); }
+    [[nodiscard]] T* operator->() { return &std::get<0>(value_); }
     [[nodiscard]] const T& operator*() const& { return std::get<0>(value_); }
     [[nodiscard]] T& operator*() & { return std::get<0>(value_); }
     [[nodiscard]] T operator*() && { return std::move(std::get<0>(value_)); }

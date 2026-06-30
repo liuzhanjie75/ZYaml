@@ -36,9 +36,10 @@ enum class TokenType {
     SeqEntry,
     FlowCollection,
     Comment,
-    Anchor,  // &name — text is the anchor name (without &)
-    Alias,   // *name — text is the anchor name (without *)
-    Tag,     // !tag — text is the tag (without !)
+    Anchor,
+    Alias,
+    Tag,
+    DocStart,  // --- document separator
     EndOfInput,
 };
 
@@ -131,6 +132,15 @@ public:
                 inlineIndent.reset();
                 continue;
             }
+            // Document start marker ---.
+            if (peek() == '-' && peekAt(1) == '-' && peekAt(2) == '-') {
+                advance(); advance(); advance();
+                skipToEndOfLine();
+                Token t{TokenType::DocStart, {}, line_, column_, pos_, indent};
+                tokens.push_back(t);
+                inlineIndent.reset();
+                continue;
+            }
             // Block sequence entry: "- " (or "-" at EOL).
             if (peek() == '-' && (peekAt(1) == ' ' || peekAt(1) == '\t' ||
                                   peekAt(1) == '\n' || peekAt(1) == '\r' || atEndAfter(1))) {
@@ -143,6 +153,42 @@ public:
                 if (!atEnd() && peek() != '\n' && peek() != '\r') {
                     bool _dc; ZE_EMIT_ANCHOR_ALIAS(*inlineIndent, _dc);
                     if (_dc) continue;
+                    if (peek() == '|' || peek() == '>') {
+                        ZE_READ(bs, readBlockScalar(indent));
+                        Token v{TokenType::Scalar, std::move(bs), line_, column_, pos_, indent};
+                        tokens.push_back(v);
+                        inlineIndent.reset();
+                        continue;
+                    }
+                    // Nested seq: "- - a" — the second '-' is another SeqEntry
+                    // at the inlineIndent. Emit it; the parser handles it as
+                    // a nested block.
+                    if (peek() == '-' && (peekAt(1) == ' ' || peekAt(1) == '\t' ||
+                                          peekAt(1) == '\n' || peekAt(1) == '\r' || atEndAfter(1))) {
+                        // Don't consume here — let the main loop handle it on
+                        // the next iteration with inlineIndent active.
+                        // The current SeqEntry token is already pushed; the
+                        // parser's parseBlock will see the next SeqEntry at
+                        // deeper indent and treat it as a nested block.
+                        // For this to work, we need to emit a SeqEntry token
+                        // for the nested dash. Fall through to the main loop
+                        // by NOT consuming and continuing.
+                        // Actually, we need to advance and emit it:
+                        advance();  // consume second '-'
+                        std::size_t nestedIndent = column_;
+                        skipSpaces();
+                        Token nt{TokenType::SeqEntry, {}, line_, column_, pos_, *inlineIndent};
+                        tokens.push_back(nt);
+                        // Read inline value for the nested seq entry.
+                        if (!atEnd() && peek() != '\n' && peek() != '\r') {
+                            ZE_READ(ns, readScalarValue());
+                            Token nv{TokenType::Scalar, std::move(ns), line_, column_, pos_, nestedIndent};
+                            tokens.push_back(nv);
+                        }
+                        emitTrailingComment(tokens, *inlineIndent);
+                        inlineIndent.reset();
+                        continue;
+                    }
                     ZE_READ(scalar, readScalarValue());
                     skipSpaces();
                     if (peek() == ':') {
@@ -266,18 +312,13 @@ private:
             if (atEnd()) return;
             if (peek() == '\n') { advance(); continue; }
             if (peek() == '\r' && peekAt(1) == '\n') { advance(); advance(); continue; }
-            // Skip document markers --- and ... (M11).
-            if (peek() == '-' && peekAt(1) == '-' && peekAt(2) == '-') {
-                advance(); advance(); advance();
-                skipToEndOfLine();
-                continue;
-            }
+            // Skip ... (doc end) markers.
             if (peek() == '.' && peekAt(1) == '.' && peekAt(2) == '.') {
                 advance(); advance(); advance();
                 skipToEndOfLine();
                 continue;
             }
-            // Non-blank content (including '#') — restore and stop.
+            // Non-blank content (including '#' and '---') — restore and stop.
             pos_ = save; line_ = saveline; column_ = savecol;
             return;
         }

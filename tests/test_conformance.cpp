@@ -21,13 +21,17 @@ int failures = 0;
 #define CHECK_EQ(a, b, msg) \
     do { auto _va = (a); auto _vb = (b); if (!(_va == _vb)) { std::cerr << "FAIL: " << (msg) << "\n"; ++failures; } } while(0)
 
-// Helper: parse and return the root as const Node* (nullptr on error).
-const zyaml::Node* parseRoot(std::string_view yaml) {
+zyaml::Node* parseRootMut(std::string_view yaml) {
     static thread_local zyaml::YamlDoc doc;
     auto r = zyaml::parse(yaml);
     if (!r) return nullptr;
     doc = std::move(*r);
     return &doc.root();
+}
+
+// For read-only tests:
+const zyaml::Node* parseRoot(std::string_view yaml) {
+    return parseRootMut(yaml);
 }
 
 // ── Ordering & structure ──────────────────────────────────────
@@ -63,21 +67,21 @@ void test_map_with_sequence_value() {
 }
 
 void test_sequence_of_sequences() {
-    // Known limitation: nested seq-of-seq (`- - a`) is an advanced YAML
-    // shape not yet supported by the scanner's inlineIndent logic. It's
-    // rare in real scene files (none in ZeroEngine's assets). This test
-    // documents the gap — if it starts passing, remove the skip.
     auto root = parseRoot(
         "matrix:\n"
         "  - - a\n"
         "    - b\n"
         "  - - c\n"
         "    - d\n");
-    if (root == nullptr) {
-        std::cerr << "  [skip] seq-of-seq not yet supported (known gap)\n";
-        return;  // not a failure — documented limitation
-    }
-    CHECK(root->find("matrix")->isSequence(), "matrix is seq");
+    CHECK(root != nullptr, "seq of seq parse");
+    if (!root) return;
+    const auto* m = root->find("matrix");
+    CHECK(m != nullptr && m->isSequence(), "matrix is seq");
+    CHECK_EQ(m->size(), 2u, "2 rows");
+    CHECK((*m)[0].isSequence(), "row 0 is seq");
+    CHECK_EQ((*m)[0].size(), 2u, "row 0 has 2");
+    CHECK_EQ(std::string((*m)[0][0].asString()), "a", "m[0][0]");
+    CHECK_EQ(std::string((*m)[1][1].asString()), "d", "m[1][1]");
 }
 
 // ── Scalar edge cases ──────────────────────────────────────────
@@ -174,16 +178,14 @@ void test_flow_seq_of_quoted() {
 }
 
 void test_nested_flow() {
-    // Known limitation: nested flow collections [[1,2],[3,4]] inside flow
-    // are not deeply parsed (scanner reads the outer [..] as one raw string,
-    // parser splits on commas but doesn't recurse into nested [..]).
     auto root = parseRoot("x: [[1, 2], [3, 4]]\n");
-    if (root == nullptr) {
-        std::cerr << "  [skip] nested flow not yet supported (known gap)\n";
-        return;  // documented limitation
-    }
+    CHECK(root != nullptr, "nested flow parse");
+    if (!root) return;
     const auto* x = root->find("x");
     CHECK(x != nullptr && x->isSequence(), "x is seq");
+    CHECK((*x)[0].isSequence(), "x[0] is seq");
+    CHECK_EQ(std::string((*x)[0][0].asString()), "1", "x[0][0]");
+    CHECK_EQ(std::string((*x)[1][1].asString()), "4", "x[1][1]");
 }
 
 // ── Comment + anchor + merge combo ────────────────────────────
@@ -245,6 +247,51 @@ void test_round_trip_complex() {
     CHECK(re->root().find("lights") != nullptr, "rt: lights");
 }
 
+void test_node_remove() {
+    auto doc = zyaml::parse("a: 1\nb: 2\nc: 3\n");
+    CHECK(doc.has_value(), "remove parse");
+    if (!doc) return;
+    auto& root = doc->root();
+    CHECK_EQ(root.size(), 3u, "3 entries before");
+    CHECK(root.remove("b"), "remove b");
+    CHECK_EQ(root.size(), 2u, "2 entries after");
+    CHECK(root.find("b") == nullptr, "b gone");
+    CHECK(root.find("a") != nullptr, "a still there");
+    CHECK(root.find("c") != nullptr, "c still there");
+    CHECK(!root.remove("nonexistent"), "remove missing returns false");
+}
+
+void test_node_remove_at() {
+    auto doc = zyaml::parse("list:\n  - x\n  - y\n  - z\n");
+    CHECK(doc.has_value(), "removeAt parse");
+    if (!doc) return;
+    auto* list = doc->root().find("list");
+    CHECK(list != nullptr, "find list");
+    CHECK_EQ(list->size(), 3u, "3 elements");
+    CHECK(list->removeAt(1), "removeAt(1)");
+    CHECK_EQ(list->size(), 2u, "2 elements after");
+    CHECK_EQ(std::string((*list)[0].asString()), "x", "elem 0 still x");
+    CHECK_EQ(std::string((*list)[1].asString()), "z", "elem 1 is now z");
+    CHECK(!list->removeAt(99), "removeAt OOB returns false");
+}
+
+void test_block_scalar_in_sequence() {
+    auto root = parseRoot(
+        "items:\n"
+        "  - |\n"
+        "    line one\n"
+        "  - plain\n");
+    CHECK(root != nullptr, "block scalar in seq parse");
+    if (!root) return;
+    const auto* items = root->find("items");
+    CHECK(items != nullptr && items->isSequence(), "items is seq");
+    CHECK_EQ(items->size(), 2u, "2 items");
+    if (items->size() == 2) {
+        CHECK_EQ(std::string((*items)[0].asString()), "line one\n", "elem 0 block scalar");
+        CHECK_EQ(std::string((*items)[1].asString()), "plain", "elem 1 plain");
+    }
+}
+
 // ── Block scalar round-trip ───────────────────────────────────
 
 void test_block_scalar_round_trip() {
@@ -288,6 +335,9 @@ int main() {
     test_comment_anchor_merge();
     test_round_trip_complex();
     test_block_scalar_round_trip();
+    test_node_remove();
+    test_node_remove_at();
+    test_block_scalar_in_sequence();
 
     if (failures == 0) {
         std::cout << "zyaml M12 conformance tests passed\n";
