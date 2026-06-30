@@ -391,4 +391,63 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
     return YamlDoc(std::move(*root));
 }
 
+// Split a multi-document stream on top-level --- markers and parse each
+// segment independently. ... (doc end) markers are skipped by the scanner.
+// Returns a vector of YamlDoc, one per document.
+[[nodiscard]] Result<std::vector<YamlDoc>> parseMultiDoc(std::string_view source) {
+    std::vector<YamlDoc> docs;
+
+    // Split on lines that are exactly "---" (possibly with trailing spaces).
+    // We do a line-by-line scan rather than a naive string split to avoid
+    // splitting on "---" inside a block scalar.
+    std::vector<std::string> segments;
+    std::string current;
+
+    for (std::size_t k = 0; k < source.size(); ) {
+        // Check if this line starts with "---" at column 0.
+        if (k == 0 || source[k - 1] == '\n') {
+            // Count leading spaces (YAML allows --- at column 0 only for M11).
+            std::size_t sp = k;
+            while (sp < source.size() && source[sp] == ' ') ++sp;
+            if (sp + 2 < source.size() && source[sp] == '-' && source[sp + 1] == '-' &&
+                source[sp + 2] == '-') {
+                // Check if the rest of the line is just spaces/comment.
+                std::size_t rest = sp + 3;
+                while (rest < source.size() && source[rest] != '\n') {
+                    if (source[rest] != ' ' && source[rest] != '\t' && source[rest] != '#') break;
+                    ++rest;
+                }
+                if (rest >= source.size() || source[rest] == '\n') {
+                    // It's a doc separator.
+                    if (!current.empty()) {
+                        segments.push_back(std::move(current));
+                        current.clear();
+                    }
+                    // Skip to next line.
+                    k = rest;
+                    if (k < source.size() && source[k] == '\n') ++k;
+                    continue;
+                }
+            }
+        }
+        current += source[k];
+        ++k;
+    }
+    if (!current.empty()) {
+        segments.push_back(std::move(current));
+    }
+
+    // If no segments, treat the whole source as one doc.
+    if (segments.empty()) {
+        segments.push_back(std::string(source));
+    }
+
+    for (auto& seg : segments) {
+        auto doc = parse(seg);
+        if (!doc) return doc.error();
+        docs.push_back(std::move(*doc));
+    }
+    return docs;
+}
+
 } // namespace zyaml

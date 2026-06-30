@@ -15,6 +15,3 @@ export import :error;
 export import :node;
 export import :parser;
 export import :emitter;
-
-// parse() is a free function in namespace zyaml (declared in :parser);
-// re-exporting :parser already brings it in.

@@ -266,6 +266,17 @@ private:
             if (atEnd()) return;
             if (peek() == '\n') { advance(); continue; }
             if (peek() == '\r' && peekAt(1) == '\n') { advance(); advance(); continue; }
+            // Skip document markers --- and ... (M11).
+            if (peek() == '-' && peekAt(1) == '-' && peekAt(2) == '-') {
+                advance(); advance(); advance();
+                skipToEndOfLine();
+                continue;
+            }
+            if (peek() == '.' && peekAt(1) == '.' && peekAt(2) == '.') {
+                advance(); advance(); advance();
+                skipToEndOfLine();
+                continue;
+            }
             // Non-blank content (including '#') — restore and stop.
             pos_ = save; line_ = saveline; column_ = savecol;
             return;
