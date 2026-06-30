@@ -21,6 +21,7 @@ module;
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 export module ZYaml:scanner;
@@ -34,7 +35,9 @@ enum class TokenType {
     MapEntry,
     SeqEntry,
     FlowCollection,
-    Comment,  // a # comment line or trailing # comment; text includes the '#'
+    Comment,
+    Anchor,  // &name — text is the anchor name (without &)
+    Alias,   // *name — text is the anchor name (without *)
     EndOfInput,
 };
 
@@ -80,6 +83,25 @@ public:
     if (!_r_##name) return _r_##name.error(); \
     std::string name = std::move(*_r_##name)
 
+// ZE_EMIT_ANCHOR_ALIAS: at a value position, if the next char is '&' or '*',
+// emit an Anchor/Alias token and skip spaces. Returns true if the line ended
+// (no inline value follows — caller should skip to next iteration). The
+// caller checks the return and continues the loop.
+#define ZE_EMIT_ANCHOR_ALIAS(tokIndent, _didContinue) \
+    _didContinue = false; \
+    if (peek() == '&' || peek() == '*') { \
+        auto _aa = readAnchorOrAlias(); \
+        Token _at{(_aa.first ? TokenType::Alias : TokenType::Anchor), \
+                  std::move(_aa.second), line_, column_, pos_, (tokIndent)}; \
+        tokens.push_back(_at); \
+        skipSpaces(); \
+        if (atEnd() || peek() == '\n' || peek() == '\r') { \
+            emitTrailingComment(tokens, (tokIndent)); \
+            inlineIndent.reset(); \
+            _didContinue = true; \
+        } \
+    }
+
         while (!atEnd()) {
             skipBlankLines();
             if (atEnd()) break;
@@ -108,6 +130,8 @@ public:
                 tokens.push_back(t);
                 // Optional inline value on the same line.
                 if (!atEnd() && peek() != '\n' && peek() != '\r') {
+                    bool _dc; ZE_EMIT_ANCHOR_ALIAS(*inlineIndent, _dc);
+                    if (_dc) continue;
                     ZE_READ(scalar, readScalarValue());
                     skipSpaces();
                     if (peek() == ':') {
@@ -116,6 +140,8 @@ public:
                         tokens.push_back(me);
                         skipSpaces();
                         if (!atEnd() && peek() != '\n' && peek() != '\r') {
+                            bool _dc2; ZE_EMIT_ANCHOR_ALIAS(*inlineIndent, _dc2);
+                            if (_dc2) continue;
                             ZE_READ(val, readScalarValue());
                             if (!val.empty()) {
                                 Token v{TokenType::Scalar, std::move(val), line_, column_, pos_, *inlineIndent};
@@ -152,6 +178,8 @@ public:
                 tokens.push_back(t);
                 skipSpaces();
                 if (!atEnd() && peek() != '\n' && peek() != '\r') {
+                    bool _dc3; ZE_EMIT_ANCHOR_ALIAS(indent, _dc3);
+                    if (_dc3) continue;
                     if (peek() == '[' || peek() == '{') {
                         const char open = peek();
                         TokenStyle vstyle = (open == '[') ? TokenStyle::FlowSeq : TokenStyle::FlowMap;
@@ -177,6 +205,7 @@ public:
             inlineIndent.reset();
         }
 #undef ZE_READ
+#undef ZE_EMIT_ANCHOR_ALIAS
         tokens.push_back(Token{TokenType::EndOfInput, {}, line_, column_, pos_, 0});
         return tokens;
     }
@@ -264,6 +293,21 @@ private:
             tokens.push_back(t);
         }
         skipToEndOfLine();
+    }
+
+    // Read an anchor (&name) or alias (*name). Caller positioned at & or *.
+    // Returns (isAlias, name). Advances past the name.
+    [[nodiscard]] std::pair<bool, std::string> readAnchorOrAlias() {
+        const bool isAlias = (peek() == '*');
+        advance();  // consume & or *
+        std::size_t start = pos_;
+        while (!atEnd()) {
+            const char c = peek();
+            if (c == ':' || c == ',' || c == ']' || c == '}' || c == '\n' ||
+                c == '\r' || c == ' ' || c == '\t' || c == '#') break;
+            advance();
+        }
+        return {isAlias, std::string(source_.substr(start, pos_ - start))};
     }
 
     [[nodiscard]] std::string readPlainScalar() {

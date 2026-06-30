@@ -21,8 +21,10 @@ module;
 
 #include <cstddef>
 #include <expected>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 export module ZYaml:parser;
@@ -46,6 +48,110 @@ private:
 };
 
 namespace detail {
+
+// Document-level anchor table: name → shared_ptr to the anchored node.
+// Aliases resolve through this table. clone() gives the alias an independent
+// copy (not shared mutation); the shared_ptr exists so the table can outlive
+// the original tree node.
+using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
+
+// Forward decls.
+[[nodiscard]] Result<Node> parseBlock(const std::vector<Token>& tokens,
+                                       std::size_t& i,
+                                       AnchorTable& anchors);
+[[nodiscard]] Result<Node> parseFlowCollection(std::string_view raw,
+                                                std::size_t line,
+                                                std::size_t column,
+                                                std::size_t offset);
+
+// parseValue: unified value reader. Called at every value position in the
+// parser (MapEntry value, SeqEntry inline, standalone). Handles Anchor
+// (&name), Alias (*name), Scalar, FlowCollection, and nested block values.
+// `indent` is the logical indent of the key/entry this value belongs to.
+// `endIndent` is the block's indent — if the value is a nested block it must
+// be deeper than `endIndent`.
+[[nodiscard]] Result<Node> parseValue(const std::vector<Token>& tokens,
+                                      std::size_t& i,
+                                      std::size_t indent,
+                                      AnchorTable& anchors) {
+    if (i >= tokens.size() || tokens[i].type == TokenType::EndOfInput) {
+        return Node::makeNull();
+    }
+    const Token& t = tokens[i];
+
+    // Anchor: &name before a value. Register, then parse the value.
+    if (t.type == TokenType::Anchor) {
+        std::string name = t.text;
+        i++;  // consume Anchor
+        Node value;
+        if (i < tokens.size() && tokens[i].type == TokenType::Scalar
+            && tokens[i].indent == indent) {
+            value = Node::makeScalarOrNull(tokens[i].text);
+            i++;
+        } else if (i < tokens.size() && tokens[i].type == TokenType::FlowCollection
+                   && tokens[i].indent == indent) {
+            auto node = parseFlowCollection(tokens[i].text, tokens[i].line,
+                                            tokens[i].column, tokens[i].offset);
+            if (!node) return node.error();
+            i++;
+            value = std::move(*node);
+        } else if (i < tokens.size() && tokens[i].type != TokenType::EndOfInput
+                   && tokens[i].indent > indent) {
+            auto child = parseBlock(tokens, i, anchors);
+            if (!child) return child.error();
+            value = std::move(*child);
+        } else {
+            value = Node::makeNull();
+        }
+        if (anchors.count(name)) {
+            return YamlError{YamlErrorCode::DuplicateAnchor,
+                             {t.line, t.column, t.offset},
+                             "duplicate anchor: &" + name};
+        }
+        anchors[name] = std::make_shared<Node>(value.clone());
+        return value;
+    }
+
+    // Alias: *name — resolve from the anchor table.
+    if (t.type == TokenType::Alias) {
+        std::string name = t.text;
+        i++;
+        auto it = anchors.find(name);
+        if (it == anchors.end()) {
+            return YamlError{YamlErrorCode::UnknownAnchor,
+                             {t.line, t.column, t.offset},
+                             "unknown anchor: *" + name};
+        }
+        return it->second->clone();
+    }
+
+    // Scalar.
+    if (t.type == TokenType::Scalar && t.indent == indent) {
+        Node v = Node::makeScalarOrNull(t.text);
+        i++;
+        return v;
+    }
+
+    // Flow collection.
+    if (t.type == TokenType::FlowCollection && t.indent == indent) {
+        auto node = parseFlowCollection(t.text, t.line, t.column, t.offset);
+        if (!node) return node.error();
+        i++;
+        return std::move(*node);
+    }
+
+    // Nested block (deeper indent). Any non-EndOfInput token at a deeper
+    // indent is a nested block — includes Scalar (standalone), MapEntry,
+    // SeqEntry, Anchor. parseBlock handles dispatching.
+    if (t.type != TokenType::EndOfInput && t.indent > indent) {
+        auto child = parseBlock(tokens, i, anchors);
+        if (!child) return child.error();
+        return std::move(*child);
+    }
+
+    // No inline value, no nested block → null.
+    return Node::makeNull();
+}
 
 // Parse a flow collection's raw text (e.g. "[a, b, c]" or "{x: 1, y: 2}")
 // into a Node. M3: single-line, comma-separated, no nested flow collections
@@ -125,7 +231,8 @@ namespace detail {
 // either a map or a sequence. Advances i past the block. Returns the Node.
 // At the top level, blockIndent is taken from the first token's indent.
 [[nodiscard]] Result<Node> parseBlock(const std::vector<Token>& tokens,
-                                       std::size_t& i) {
+                                       std::size_t& i,
+                                       AnchorTable& anchors) {
     // Skip leading block comments — they bind to the first entry's `pre`.
     std::vector<std::string> currentPre;
     while (i < tokens.size() && tokens[i].type == TokenType::Comment
@@ -174,36 +281,32 @@ namespace detail {
         if (t.type == TokenType::SeqEntry) {
             if (firstKind != TokenType::SeqEntry) break;
             i++;  // consume SeqEntry
-            Node value;
+            // SeqEntry special case: a scalar followed by a deeper nested block
+            // (e.g. "- name: floor" then "  path: ..." at indent+2). parseValue
+            // handles scalar; the nested block follows as a second step.
             if (i < tokens.size() && tokens[i].type == TokenType::Scalar
                 && tokens[i].indent == t.indent) {
-                value = Node::makeScalarOrNull(tokens[i].text);
+                Node value = Node::makeScalarOrNull(tokens[i].text);
                 i++;
+                // Check for a deeper block extending the seq element.
                 if (i < tokens.size() && tokens[i].type != TokenType::EndOfInput
                     && tokens[i].indent > t.indent
                     && (tokens[i].type == TokenType::MapEntry
-                        || tokens[i].type == TokenType::SeqEntry)) {
-                    auto child = parseBlock(tokens, i);
+                        || tokens[i].type == TokenType::SeqEntry
+                        || tokens[i].type == TokenType::Anchor)) {
+                    auto child = parseBlock(tokens, i, anchors);
                     if (!child) return child.error();
                     value = std::move(*child);
                 }
-            } else if (i < tokens.size() && tokens[i].type == TokenType::FlowCollection
-                       && tokens[i].indent == t.indent) {
-                auto node = parseFlowCollection(tokens[i].text, tokens[i].line,
-                                                tokens[i].column, tokens[i].offset);
-                if (!node) return node.error();
-                i++;
-                value = std::move(*node);
-            } else if (i < tokens.size() && tokens[i].type != TokenType::EndOfInput
-                       && tokens[i].indent > t.indent) {
-                auto child = parseBlock(tokens, i);
-                if (!child) return child.error();
-                value = std::move(*child);
+                finalizeValue(value);
+                container.push(std::move(value));
             } else {
-                value = Node::makeNull();
+                // No inline scalar — parseValue handles anchor/alias/flow/nested.
+                auto value = parseValue(tokens, i, t.indent, anchors);
+                if (!value) return value.error();
+                finalizeValue(*value);
+                container.push(std::move(*value));
             }
-            finalizeValue(value);
-            container.push(std::move(value));
             continue;
         }
 
@@ -211,28 +314,10 @@ namespace detail {
             if (firstKind != TokenType::MapEntry) break;
             std::string key = t.text;
             i++;  // consume MapEntry
-            Node value;
-            if (i < tokens.size() && tokens[i].type == TokenType::Scalar
-                && tokens[i].indent == t.indent) {
-                value = Node::makeScalarOrNull(tokens[i].text);
-                i++;
-            } else if (i < tokens.size() && tokens[i].type == TokenType::FlowCollection
-                       && tokens[i].indent == t.indent) {
-                auto node = parseFlowCollection(tokens[i].text, tokens[i].line,
-                                                tokens[i].column, tokens[i].offset);
-                if (!node) return node.error();
-                i++;
-                value = std::move(*node);
-            } else if (i < tokens.size() && tokens[i].type != TokenType::EndOfInput
-                       && tokens[i].indent > t.indent) {
-                auto child = parseBlock(tokens, i);
-                if (!child) return child.error();
-                value = std::move(*child);
-            } else {
-                value = Node::makeNull();
-            }
-            finalizeValue(value);
-            container.appendMapEntry(std::move(key), std::move(value));
+            auto value = parseValue(tokens, i, t.indent, anchors);
+            if (!value) return value.error();
+            finalizeValue(*value);
+            container.appendMapEntry(std::move(key), std::move(*value));
             continue;
         }
 
@@ -263,7 +348,8 @@ namespace detail {
     if (!tokens) return tokens.error();
 
     std::size_t i = 0;
-    auto root = detail::parseBlock(*tokens, i);
+    detail::AnchorTable anchors;
+    auto root = detail::parseBlock(*tokens, i, anchors);
     if (!root) return root.error();
 
     // A well-formed document has exactly one root block. If parseBlock
