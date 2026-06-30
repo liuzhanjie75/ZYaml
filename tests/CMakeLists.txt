@@ -133,3 +133,13 @@ if(MSVC)
 endif()
 
 add_test(NAME zyaml_errors COMMAND test_errors)
+
+add_executable(test_conformance test_conformance.cpp)
+target_link_libraries(test_conformance PRIVATE ZYaml::ZYaml)
+set_target_properties(test_conformance PROPERTIES CXX_SCAN_FOR_MODULES ON)
+target_compile_features(test_conformance PRIVATE cxx_std_23)
+if(MSVC)
+    target_compile_options(test_conformance PRIVATE /utf-8 /W4 /WX /Zc:preprocessor /permissive-)
+endif()
+
+add_test(NAME zyaml_conformance COMMAND test_conformance)

@@ -195,15 +195,50 @@ using AnchorTable = std::unordered_map<std::string, std::shared_ptr<Node>>;
         Node seq = Node::makeSequence();
         // Split on top-level commas.
         std::size_t segStart = 0;
+        auto stripQuotes = [](std::string_view s) -> std::string {
+            if (s.size() >= 2 && s.front() == '"' && s.back() == '"') {
+                // Double-quoted: process escapes (minimal).
+                std::string out;
+                for (std::size_t j = 1; j < s.size() - 1; ++j) {
+                    if (s[j] == '\\' && j + 1 < s.size() - 1) {
+                        ++j;
+                        switch (s[j]) {
+                            case 'n': out += '\n'; break;
+                            case 't': out += '\t'; break;
+                            case 'r': out += '\r'; break;
+                            case '\\': out += '\\'; break;
+                            case '"': out += '"'; break;
+                            default: out += s[j]; break;
+                        }
+                    } else {
+                        out += s[j];
+                    }
+                }
+                return out;
+            }
+            if (s.size() >= 2 && s.front() == '\'' && s.back() == '\'') {
+                // Single-quoted: '' → '
+                std::string out;
+                for (std::size_t j = 1; j < s.size() - 1; ++j) {
+                    if (s[j] == '\'' && j + 1 < s.size() - 1 && s[j + 1] == '\'') {
+                        out += '\'';
+                        ++j;
+                    } else {
+                        out += s[j];
+                    }
+                }
+                return out;
+            }
+            return std::string(s);
+        };
         for (std::size_t k = 0; k <= inner.size(); ++k) {
             const bool atEndOrComma = (k == inner.size() || inner[k] == ',');
             if (atEndOrComma) {
                 std::string_view item = inner.substr(segStart, k - segStart);
-                // Trim spaces.
                 while (!item.empty() && (item.front() == ' ' || item.front() == '\t')) item.remove_prefix(1);
                 while (!item.empty() && (item.back() == ' ' || item.back() == '\t')) item.remove_suffix(1);
                 if (!item.empty()) {
-                    seq.push(Node::makeScalarOrNull(std::string(item)));
+                    seq.push(Node::makeScalarOrNull(stripQuotes(item)));
                 }
                 segStart = k + 1;
             }
