@@ -63,6 +63,7 @@ target_sources(ZYaml
             src/node.ixx
             src/scanner.ixx
             src/parser.ixx
+            src/emitter.ixx
 )
 
 target_include_directories(ZYaml PUBLIC
