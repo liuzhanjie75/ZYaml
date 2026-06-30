@@ -191,6 +191,13 @@ public:
                 if (!atEnd() && peek() != '\n' && peek() != '\r') {
                     bool _dc3; ZE_EMIT_ANCHOR_ALIAS(indent, _dc3);
                     if (_dc3) continue;
+                    if (peek() == '|' || peek() == '>') {
+                        ZE_READ(bs, readBlockScalar(indent));
+                        Token v{TokenType::Scalar, std::move(bs), line_, column_, pos_, indent};
+                        tokens.push_back(v);
+                        inlineIndent.reset();
+                        continue;
+                    }
                     if (peek() == '[' || peek() == '{') {
                         const char open = peek();
                         TokenStyle vstyle = (open == '[') ? TokenStyle::FlowSeq : TokenStyle::FlowMap;
@@ -304,6 +311,139 @@ private:
             tokens.push_back(t);
         }
         skipToEndOfLine();
+    }
+
+    // Read a block scalar (| literal or > folded). Caller positioned at | or >.
+    // parentIndent is the indent of the key/entry this block belongs to.
+    // The block content lives on subsequent lines at indent > parentIndent.
+    // Returns the decoded content. Advances past the entire block.
+    [[nodiscard]] Result<std::string> readBlockScalar(std::size_t parentIndent) {
+        const bool folded = (peek() == '>');
+        advance();  // consume | or >
+
+        // Parse chomping indicator + optional explicit indent.
+        char chomp = 'c';  // 'c'=clip, 's'=strip, 'k'=keep
+        std::size_t explicitIndent = 0;
+        bool hasExplicitIndent = false;
+        while (!atEnd()) {
+            const char c = peek();
+            if (c == '-') { chomp = 's'; advance(); continue; }
+            if (c == '+') { chomp = 'k'; advance(); continue; }
+            if (c >= '0' && c <= '9') { explicitIndent = explicitIndent * 10 + (c - '0'); hasExplicitIndent = true; advance(); continue; }
+            break;
+        }
+        // Consume rest of indicator line (may have inline comment).
+        skipSpaces();
+        if (peek() == '#') {
+            // Skip inline comment on the indicator line — don't emit it
+            // (block scalar comment handling is a later refinement).
+            skipToEndOfLine();
+        } else {
+            skipToEndOfLine();
+        }
+
+        // Read content lines until we hit a line at indent <= parentIndent.
+        // The block indent is determined by the first non-empty content line
+        // (or the explicit indent if given).
+        std::size_t blockIndent = hasExplicitIndent ? (parentIndent + explicitIndent) : 0;
+        bool indentDetermined = hasExplicitIndent;
+        std::vector<std::string> lines;  // raw lines with indent stripped
+
+        while (!atEnd()) {
+            // Peek the line's indent.
+            std::size_t li = 0;
+            while (pos_ + li < source_.size() && source_[pos_ + li] == ' ') ++li;
+
+            // Check if line is empty/blank (only spaces or starts with \n).
+            bool isBlank = (pos_ + li >= source_.size()) ||
+                           source_[pos_ + li] == '\n' || source_[pos_ + li] == '\r';
+            if (isBlank) {
+                // Blank lines are part of the block if we haven't determined
+                // the end yet. But if the line has fewer spaces than blockIndent
+                // AND it's truly empty (just \n), it might end the block.
+                if (indentDetermined) {
+                    lines.push_back("");  // blank line
+                    // Consume the blank line.
+                    while (!atEnd() && peek() != '\n') advance();
+                    if (!atEnd() && peek() == '\n') advance();
+                } else {
+                    // Skip blank lines before content starts.
+                    while (!atEnd() && peek() != '\n') advance();
+                    if (!atEnd() && peek() == '\n') advance();
+                }
+                continue;
+            }
+
+            if (!indentDetermined) {
+                blockIndent = li;
+                indentDetermined = true;
+            }
+
+            if (li <= parentIndent) break;  // dedent → end of block
+
+            // Read the content of this line (after blockIndent spaces).
+            std::string line = std::string(source_.substr(pos_ + blockIndent));
+            // Truncate at newline.
+            auto nlPos = line.find('\n');
+            if (nlPos != std::string::npos) line = line.substr(0, nlPos);
+            // Handle \r\n.
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            lines.push_back(line);
+
+            // Advance past this line.
+            while (!atEnd() && peek() != '\n') advance();
+            if (!atEnd() && peek() == '\n') advance();
+        }
+
+        // Apply folding or literal.
+        std::string result;
+        if (folded) {
+            // Fold: consecutive non-empty lines joined by ' '; blank line → '\n'.
+            for (std::size_t k = 0; k < lines.size(); ++k) {
+                if (k > 0) {
+                    if (lines[k].empty()) {
+                        // Blank line → paragraph break (newline).
+                        // But don't double up if previous was also blank.
+                        if (result.empty() || result.back() != '\n') {
+                            result += '\n';
+                        }
+                    } else if (!lines[k - 1].empty()) {
+                        result += ' ';
+                    } else {
+                        // After blank line, start new paragraph — no space needed.
+                    }
+                }
+                result += lines[k];
+            }
+        } else {
+            // Literal: preserve newlines.
+            for (const auto& l : lines) {
+                result += l;
+                result += '\n';
+            }
+        }
+
+        // Apply chomping (trailing newlines).
+        // Count trailing newlines.
+        std::size_t trailingNl = 0;
+        while (trailingNl < result.size() && result[result.size() - 1 - trailingNl] == '\n') {
+            ++trailingNl;
+        }
+        // Strip non-newline trailing chars? No — just handle trailing \n count.
+        if (chomp == 's') {
+            // Strip: remove ALL trailing newlines.
+            result.erase(result.size() - trailingNl);
+        } else if (chomp == 'k') {
+            // Keep: all trailing newlines are preserved (already in result).
+        } else {
+            // Clip: keep exactly one trailing newline.
+            result.erase(result.size() - trailingNl);
+            if (!result.empty() || trailingNl > 0) {
+                result += '\n';
+            }
+        }
+
+        return result;
     }
 
     // Read an anchor (&name) or alias (*name). Caller positioned at & or *.
