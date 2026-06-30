@@ -33,16 +33,26 @@ enum class TokenType {
     Scalar,
     MapEntry,
     SeqEntry,
+    FlowCollection,  // a complete [..] or {..} group, raw text in `text`
     EndOfInput,
+};
+
+// Style hint for a Scalar / FlowCollection token.
+enum class TokenStyle {
+    Plain,
+    FlowSeq,   // text is "[a, b, c]" (brackets included)
+    FlowMap,   // text is "{k: v, ...}" (braces included)
 };
 
 struct Token {
     TokenType type = TokenType::EndOfInput;
-    std::string text;     // scalar text; key text for MapEntry; empty for SeqEntry
+    std::string text;     // scalar text; key text for MapEntry; empty for SeqEntry;
+                          // raw "[...]" / "{...}" for FlowCollection
     std::size_t line = 1;
     std::size_t column = 1;
     std::size_t offset = 0;
-    std::size_t indent = 0;  // leading-space count of the line this token starts on
+    std::size_t indent = 0;
+    TokenStyle style = TokenStyle::Plain;  // trailing so aggregate init w/o it defaults to Plain
 };
 
 class Scanner {
@@ -101,7 +111,19 @@ public:
                 inlineIndent.reset();
                 continue;
             }
-            // Otherwise: a scalar (key or standalone value).
+            // Otherwise: a scalar, a flow collection, or a standalone value.
+            if (peek() == '[' || peek() == '{') {
+                const char open = peek();
+                TokenStyle style = (open == '[') ? TokenStyle::FlowSeq : TokenStyle::FlowMap;
+                std::string raw = readFlowCollection();
+                Token t{.type = TokenType::FlowCollection, .text = std::move(raw),
+                        .line = line_, .column = column_, .offset = pos_, .indent = indent,
+                        .style = style};
+                tokens.push_back(t);
+                skipToEndOfLine();
+                inlineIndent.reset();
+                continue;
+            }
             std::string scalar = readPlainScalar();
             skipSpaces();
             if (peek() == ':') {
@@ -110,10 +132,20 @@ public:
                 tokens.push_back(t);
                 skipSpaces();
                 if (!atEnd() && peek() != '\n' && peek() != '\r') {
-                    std::string val = readPlainScalar();
-                    if (!val.empty()) {
-                        Token v{TokenType::Scalar, std::move(val), line_, column_, pos_, indent};
+                    if (peek() == '[' || peek() == '{') {
+                        const char open = peek();
+                        TokenStyle vstyle = (open == '[') ? TokenStyle::FlowSeq : TokenStyle::FlowMap;
+                        std::string raw = readFlowCollection();
+                        Token v{.type = TokenType::FlowCollection, .text = std::move(raw),
+                                .line = line_, .column = column_, .offset = pos_, .indent = indent,
+                                .style = vstyle};
                         tokens.push_back(v);
+                    } else {
+                        std::string val = readPlainScalar();
+                        if (!val.empty()) {
+                            Token v{TokenType::Scalar, std::move(val), line_, column_, pos_, indent};
+                            tokens.push_back(v);
+                        }
                     }
                 }
                 skipToEndOfLine();
@@ -195,6 +227,42 @@ private:
         std::string s(source_.substr(start, pos_ - start));
         while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
         return s;
+    }
+
+    // Read a complete flow collection starting at the current '[' or '{',
+    // including nested collections and quoted strings. Returns the raw text
+    // with the outer brackets/braces included. The parser interprets it.
+    [[nodiscard]] std::string readFlowCollection() {
+        std::size_t start = pos_;
+        const char open = peek();
+        char close = (open == '[') ? ']' : '}';
+        int depth = 0;
+        char quote = 0;
+        while (!atEnd()) {
+            const char c = peek();
+            if (quote) {
+                if (c == quote) quote = 0;
+                else if (c == '\\' && quote == '"' && !atEndAfter(1)) advance();
+                advance();
+                continue;
+            }
+            if (c == '"' || c == '\'') { quote = c; advance(); continue; }
+            if (c == '[' || c == '{') { ++depth; advance(); continue; }
+            if (c == ']' || c == '}') {
+                if (depth == 0 && c == close) { advance(); break; }
+                if (depth > 0) { --depth; advance(); continue; }
+                // Mismatched close — stop here; parser will report.
+                break;
+            }
+            if (c == '\n' || c == '\r') {
+                // Flow can span lines, but M3 keeps it single-line for
+                // simplicity. Stop at newline; the parser treats truncated
+                // flow as a parse error.
+                break;
+            }
+            advance();
+        }
+        return std::string(source_.substr(start, pos_ - start));
     }
 };
 
