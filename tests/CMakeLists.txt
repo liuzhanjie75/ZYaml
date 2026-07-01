@@ -153,3 +153,13 @@ if(MSVC)
 endif()
 
 add_test(NAME zyaml_spec COMMAND test_spec)
+
+add_executable(fuzz_harness fuzz_harness.cpp)
+target_link_libraries(fuzz_harness PRIVATE ZYaml::ZYaml)
+set_target_properties(fuzz_harness PROPERTIES CXX_SCAN_FOR_MODULES ON)
+target_compile_features(fuzz_harness PRIVATE cxx_std_23)
+if(MSVC)
+    target_compile_options(fuzz_harness PRIVATE /utf-8 /W4 /WX /Zc:preprocessor /permissive-)
+endif()
+
+add_test(NAME zyaml_fuzz COMMAND fuzz_harness)

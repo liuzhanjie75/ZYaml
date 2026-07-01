@@ -30,7 +30,11 @@ namespace emit_detail {
 // string. We're conservative — quoting is safe; the cost is aesthetics.
 [[nodiscard]] bool needsQuoting(std::string_view s) {
     if (s.empty()) return true;
+    // Leading/trailing whitespace would be stripped by the scanner on
+    // re-parse, losing data. Quote so it round-trips.
     const char first = s.front();
+    const char last = s.back();
+    if (first == ' ' || first == '\t' || last == ' ' || last == '\t') return true;
     if (first == '-' || first == '?' || first == ':' || first == ',' ||
         first == '[' || first == ']' || first == '{' || first == '}' ||
         first == '#' || first == '&' || first == '*' || first == '!' ||
@@ -39,11 +43,18 @@ namespace emit_detail {
         return true;
     }
     // Any ':' makes the scanner stop mid-scalar (readPlainScalar breaks on
-    // ':' unconditionally), so quote anything containing a colon. Also quote
-    // if a space-then-# looks like an inline comment.
+    // ':' unconditionally), so quote anything containing a colon. Also
+    // quote if a space-then-# looks like an inline comment. Quote any
+    // control char (tab, newline, etc.) or DEL — they'd either break
+    // indentation or be unverifiable on re-parse. Quote any ' or " — in
+    // flow context the scanner's readFlowCollection tracks quotes and
+    // would misread a plain scalar containing them (eating the closing
+    // bracket as a "quoted" char). Over-quotes slightly in block context
+    // but guarantees round-trip safety.
     for (char c : s) {
         if (c == ':') return true;
-        if (c == '\n' || c == '\r') return true;
+        if (c == '\'' || c == '"') return true;
+        if (static_cast<unsigned char>(c) < 0x20 || c == 0x7f) return true;
     }
     for (std::size_t i = 0; i + 1 < s.size(); ++i) {
         if (s[i] == ' ' && s[i + 1] == '#') return true;
@@ -146,6 +157,23 @@ void emitNode(std::ostringstream& out, const Node& node, std::size_t indent) {
     auto shouldFlow = [&](const Node& n) {
         return !forceBlock && shouldEmitFlow(n);
     };
+    // Empty collections: emit as [] / {} so they round-trip. Block style
+    // can't represent an empty seq/map (no entries to emit), so flow is
+    // the only option — allowed even at root for this case.
+    if (node.isSequence() && node.size() == 0) {
+        indentTo(out, indent);
+        out << "[]";
+        if (node.comments().inline_) out << "  " << *node.comments().inline_;
+        out << '\n';
+        return;
+    }
+    if (node.isMap() && node.size() == 0) {
+        indentTo(out, indent);
+        out << "{}";
+        if (node.comments().inline_) out << "  " << *node.comments().inline_;
+        out << '\n';
+        return;
+    }
     if (node.isNull()) {
         indentTo(out, indent);
         out << "null";
