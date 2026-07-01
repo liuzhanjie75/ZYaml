@@ -173,3 +173,35 @@ if(MSVC)
 endif()
 
 add_test(NAME zyaml_suite COMMAND test_yaml_suite)
+
+# ── Differential fuzzing (optional, requires libyaml) ───────────────
+# Parses the same YAML with ZYaml and libyaml, compares trees. libyaml
+# is fetched via FetchContent and built as a static lib; gated so the
+# library itself stays dep-free. Enable with -DZYAML_BUILD_FUZZ_DIFF=ON.
+option(ZYAML_BUILD_FUZZ_DIFF "Build differential fuzzer (fetches libyaml)" OFF)
+if(ZYAML_BUILD_FUZZ_DIFF)
+    include(FetchContent)
+    FetchContent_Declare(
+        libyaml
+        GIT_REPOSITORY https://github.com/yaml/libyaml.git
+        GIT_TAG 0.2.5
+        GIT_SHALLOW TRUE
+    )
+    # libyaml builds a shared lib by default; force static.
+    set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+    set(YAML_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+    set(YAML_CPP_INSTALL OFF CACHE BOOL "" FORCE)
+    # libyaml's CMakeLists uses an old cmake_minimum_required; allow it.
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+    FetchContent_MakeAvailable(libyaml)
+
+    add_executable(fuzz_diff fuzz_diff.cpp)
+    target_link_libraries(fuzz_diff PRIVATE ZYaml::ZYaml yaml)
+    set_target_properties(fuzz_diff PROPERTIES CXX_SCAN_FOR_MODULES ON)
+    target_compile_features(fuzz_diff PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(fuzz_diff PRIVATE /utf-8 /W4 /WX /Zc:preprocessor /permissive-)
+    endif()
+
+    add_test(NAME zyaml_fuzz_diff COMMAND fuzz_diff)
+endif()
