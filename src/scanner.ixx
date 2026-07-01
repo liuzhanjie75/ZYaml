@@ -29,6 +29,116 @@ import :error;
 
 export namespace zyaml {
 
+// ── Shared quoted-scalar decoders ───────────────────────────────────
+// Single source of truth for escape processing and multi-line folding.
+// Used by both Scanner::readQuoted (block context) and stripFlowQuotes
+// (flow context) so the two paths can't drift.
+
+namespace quote_detail {
+
+// Apply a double-quoted escape sequence. `e` is the char after '\'.
+// Writes the decoded char(s) to `out`. Returns an error for unknown
+// escapes. Inline-able; called from the decode loop below.
+[[nodiscard]] inline std::optional<YamlError>
+applyDoubleEscape(char e, std::string& out) {
+    switch (e) {
+        case 'n': out += '\n'; break;
+        case 't': out += '\t'; break;
+        case 'r': out += '\r'; break;
+        case '\\': out += '\\'; break;
+        case '"': out += '"'; break;
+        case '\'': out += '\''; break;
+        case '0': out += '\0'; break;
+        case 'a': out += '\a'; break;
+        case 'b': out += '\b'; break;
+        case 'f': out += '\f'; break;
+        case 'v': out += '\v'; break;
+        case 'e': out += '\x1b'; break;
+        case '/': out += '/'; break;
+        case ' ': out += ' '; break;
+        default:
+            return YamlError{YamlErrorCode::BadEscape, {},
+                             std::string("unknown escape \\") + e};
+    }
+    return std::nullopt;
+}
+
+} // namespace quote_detail
+
+// Decode a double-quoted scalar's content (the text between the quotes):
+// process escapes and fold multi-line breaks per YAML 1.2. A trailing
+// backslash before a line break continues the line (folds to nothing);
+// a bare line break folds to a single space. Unknown escapes are a
+// BadEscape error. `line`/`column`/`offset` locate the scalar start for
+// error messages.
+[[nodiscard]] inline Result<std::string> decodeDoubleQuoted(std::string_view s,
+                                                             std::size_t line,
+                                                             std::size_t column,
+                                                             std::size_t offset) {
+    std::string out;
+    std::size_t k = 0;
+    while (k < s.size()) {
+        const char c = s[k];
+        if (c == '\n' || c == '\r') {
+            while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
+            if (c == '\r' && k + 1 < s.size() && s[k + 1] == '\n') k += 2;
+            else ++k;
+            while (k < s.size() && (s[k] == ' ' || s[k] == '\t')) ++k;
+            if (!out.empty() && out.back() != ' ') out += ' ';
+            continue;
+        }
+        if (c == '\\' && k + 1 < s.size()) {
+            const char e = s[k + 1];
+            if (e == '\n' || e == '\r') {
+                if (e == '\r' && k + 2 < s.size() && s[k + 2] == '\n') k += 3;
+                else k += 2;
+                while (k < s.size() && (s[k] == ' ' || s[k] == '\t')) ++k;
+                continue;
+            }
+            if (auto err = quote_detail::applyDoubleEscape(e, out)) {
+                err->where = {line, column, offset};
+                return *err;
+            }
+            k += 2;
+            continue;
+        }
+        out += c;
+        ++k;
+    }
+    return out;
+}
+
+// Decode a single-quoted scalar's content: `''` → `'`, bare line breaks
+// fold to a single space. No escape sequences (single-quoted scalars have
+// none per YAML 1.2).
+[[nodiscard]] inline Result<std::string> decodeSingleQuoted(std::string_view s) {
+    std::string out;
+    std::size_t k = 0;
+    while (k < s.size()) {
+        const char c = s[k];
+        if (c == '\'') {
+            if (k + 1 < s.size() && s[k + 1] == '\'') {
+                out += '\'';
+                k += 2;
+                continue;
+            }
+            ++k;  // lone trailing quote (shouldn't happen — caller strips outer pair)
+            continue;
+        }
+        if (c == '\n' || c == '\r') {
+            while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
+            if (c == '\r' && k + 1 < s.size() && s[k + 1] == '\n') k += 2;
+            else ++k;
+            while (k < s.size() && (s[k] == ' ' || s[k] == '\t')) ++k;
+            if (!out.empty() && out.back() != ' ') out += ' ';
+            continue;
+        }
+        out += c;
+        ++k;
+    }
+    return out;
+}
+
 enum class TokenType {
     Scalar,
     MapEntry,
@@ -578,96 +688,44 @@ private:
     }
 
     // Read a quoted scalar starting at the current '"' or '\''. Returns the
-    // decoded content (escapes processed). Advances past the closing quote.
-    // Multi-line quoted scalars are supported per YAML 1.2: line breaks are
-    // folded to spaces (single-quoted) or to spaces / nothing at all when
-    // escaped with a trailing backslash (double-quoted). Unknown escapes
-    // are a BadEscape error. Reaching EOF without a closing quote is an
-    // UnclosedQuote error.
+    // decoded content. The raw text between the quotes is collected first
+    // (tracking line/column for unclosed-quote errors), then decoded via
+    // the shared decodeDoubleQuoted/decodeSingleQuoted — the same path
+    // flow context uses, so block and flow quoted scalars stay consistent.
     [[nodiscard]] Result<std::string> readQuoted() {
         const std::size_t startLine = line_;
         const std::size_t startCol = column_;
         const std::size_t startOffset = pos_;
         const char quote = peek();
         advance();  // consume opening quote
-        std::string out;
+        std::string raw;
         bool closed = false;
         while (!atEnd()) {
             const char c = peek();
-            // Line break inside a quoted scalar: fold per YAML 1.2.
-            if (c == '\n' || c == '\r') {
-                // Double-quoted with trailing backslash: the backslash already
-                // consumed a line break as "no content" — skip leading
-                // whitespace of the next line and emit nothing.
-                if (quote == '"' && !out.empty() && out.back() == '\x01') {
-                    out.pop_back();  // remove the sentinel we stored at the `\`
-                    advance();  // consume the newline
-                    if (peek() == '\r') { advance(); if (peek() == '\n') advance(); }
-                    else if (peek() == '\n') { advance(); }
-                    // Skip leading whitespace of the continuation line.
-                    while (peek() == ' ' || peek() == '\t') advance();
-                    continue;
-                }
-                // Otherwise fold the line break to a single space (both
-                // quote styles). Consume \r\n or \n. Trim trailing spaces
-                // on the current line and leading spaces on the next.
-                // Drop trailing spaces/tabs already appended.
-                while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
-                advance();  // consume the newline char (\n or \r)
-                if (peek() == '\r') { advance(); if (peek() == '\n') advance(); }
-                else if (peek() == '\n') { advance(); }
-                while (peek() == ' ' || peek() == '\t') advance();
-                if (!out.empty() && out.back() != ' ') out += ' ';
+            // For double quotes, an escape sequence `\<x>` must not be
+            // mistaken for a closing quote — keep both chars verbatim
+            // in raw and let the decoder process them.
+            if (quote == '"' && c == '\\' && !atEndAfter(1)) {
+                raw += c;
+                raw += peekAt(1);
+                advance(); advance();
                 continue;
             }
-            if (quote == '"') {
-                if (c == '"') { advance(); closed = true; break; }
-                if (c == '\\' && !atEndAfter(1)) {
-                    const char e = peekAt(1);
-                    // Trailing backslash at end of line → line continuation
-                    // (fold to nothing). We store a sentinel byte so the
-                    // line-break handler above can detect it.
-                    if (e == '\n' || e == '\r') {
-                        out += '\x01';  // sentinel for "continuation pending"
-                        advance();  // consume '\'
-                        continue;
-                    }
-                    advance();  // consume '\'
-                    switch (e) {
-                        case 'n': out += '\n'; break;
-                        case 't': out += '\t'; break;
-                        case 'r': out += '\r'; break;
-                        case '\\': out += '\\'; break;
-                        case '"': out += '"'; break;
-                        case '\'': out += '\''; break;
-                        case '0': out += '\0'; break;
-                        case 'a': out += '\a'; break;
-                        case 'b': out += '\b'; break;
-                        case 'f': out += '\f'; break;
-                        case 'v': out += '\v'; break;
-                        case 'e': out += '\x1b'; break;
-                        case '/': out += '/'; break;
-                        case ' ': out += ' '; break;
-                        default:
-                            return YamlError{YamlErrorCode::BadEscape,
-                                             {line_, column_, pos_},
-                                             std::string("unknown escape \\") + e};
-                    }
-                    advance();
+            if (c == quote) {
+                if (quote == '\'' && peekAt(1) == '\'') {
+                    // '' escape — keep both quotes in raw; the decoder
+                    // collapses them to one '.
+                    raw += '\'';
+                    raw += '\'';
+                    advance(); advance();
                     continue;
                 }
-                out += c;
-                advance();
-            } else {
-                if (c == '\'') {
-                    if (peekAt(1) == '\'') { out += '\''; advance(); advance(); continue; }
-                    advance();  // consume closing '
-                    closed = true;
-                    break;
-                }
-                out += c;
-                advance();
+                advance();  // consume closing quote
+                closed = true;
+                break;
             }
+            raw += c;
+            advance();
         }
         if (!closed) {
             return YamlError{YamlErrorCode::UnclosedQuote,
@@ -675,7 +733,10 @@ private:
                              quote == '"' ? "unterminated double-quoted scalar"
                                           : "unterminated single-quoted scalar"};
         }
-        return out;
+        if (quote == '"') {
+            return decodeDoubleQuoted(raw, startLine, startCol, startOffset);
+        }
+        return decodeSingleQuoted(raw);
     }
 
     // Read a scalar value: if it starts with a quote, readQuoted; else plain.
