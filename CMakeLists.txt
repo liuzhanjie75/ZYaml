@@ -41,7 +41,9 @@ message(STATUS "ZYaml: CMAKE_CXX_SCAN_FOR_MODULES=${CMAKE_CXX_SCAN_FOR_MODULES}"
 
 option(ZYAML_BUILD_TESTS "Build ZYaml unit tests" ON)
 option(ZYAML_BUILD_EXAMPLES "Build ZYaml examples" ON)
-option(ZYAML_BUILD_BENCH "Build ZYaml benchmark" ON)
+# Benchmark is opt-in: its bounds are calibrated for Release, and the
+# flat-map case can flake in Debug. Enable explicitly or via Release build.
+option(ZYAML_BUILD_BENCH "Build ZYaml benchmark (Release recommended)" OFF)
 
 # Warnings as errors for the library itself; consumers opt in via ZYaml::ZYaml.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")

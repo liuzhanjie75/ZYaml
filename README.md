@@ -115,8 +115,8 @@ Five layers of tests, all run via ctest:
 1. **Unit tests** (`test_smoke`, `test_parser`, `test_flow`, `test_anchors`, `test_merge`, `test_block_scalar`, `test_errors`, `test_regression`, `test_convert`, `test_comments`, `test_quoted`, `test_emit`, `test_sequence`, `test_conformance`) — feature-level coverage, one executable per milestone.
 2. **Curated yaml-test-suite subset** (`test_yaml_suite`) — 23 scenarios citing official test IDs (2JQS, 3MYT, 4CQQ, 4FJ6, 6JWB, 4ABK, 6PBE, 6ZKB, 6LVF, 4Q9F, 6BFJ, 7LBH, 5C5M, plus error cases). Known-good baseline for implemented features.
 3. **Property-based fuzz** (`fuzz_harness`) — generates random YAML and checks invariants (no crash, round-trip stability, clone equality, map consistency). Seeded (`--seed`/`--runs` flags) for reproducibility; ~5000 iterations per ctest run.
-4. **Release benchmark** (`zyaml_bench`) — parses/emits five representative shapes and asserts upper bounds to catch performance regressions. The flat-map bound is the O(n²) sentinel (was 3056 ms before the hash side-index; ~15 ms Release now).
-5. **Differential fuzzer** (`fuzz_diff`, optional) — parses the same YAML with both ZYaml and libyaml and compares trees. Catches spec deviations that internal invariants can't see. 0 structural mismatches across 15000 runs.
+4. **Release benchmark** (`zyaml_bench`, opt-in via `-DZYAML_BUILD_BENCH=ON`) — parses/emits five representative shapes and asserts upper bounds to catch performance regressions. Bounds are calibrated for Release; the flat-map bound is the O(n²) sentinel (was 3056 ms before the hash side-index; ~15 ms Release now).
+5. **Differential fuzzer** (`fuzz_diff`, optional via `-DZYAML_BUILD_FUZZ_DIFF=ON`) — parses the same YAML with both ZYaml and libyaml and compares trees. Catches spec deviations that internal invariants can't see. 0 structural mismatches across 15000 runs; prints repro inputs for any accept/reject asymmetry.
 
 ```sh
 # Enable the differential harness (fetches libyaml via FetchContent):
