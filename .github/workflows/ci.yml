@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs on the same ref when a new commit lands.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Windows: MSVC Debug + Release, default test set ─────────────────
+  windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        build_type: [Debug, Release]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }}
+      - name: Test (default suite, no bench/fuzz_diff)
+        working-directory: build
+        run: ctest -C ${{ matrix.build_type }} --output-on-failure -LE bench
+
+  # ── Windows: Debug + differential fuzzer (libyaml fetch) ────────────
+  windows-fuzz-diff:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure with fuzz_diff
+        run: cmake -S . -B build_diff -G "Visual Studio 17 2022" -A x64 -DZYAML_BUILD_FUZZ_DIFF=ON
+      - name: Build fuzz_diff
+        run: cmake --build build_diff --config Debug --target fuzz_diff
+      - name: Run differential fuzzer (strict oracle)
+        working-directory: build_diff
+        run: ctest -C Debug -R fuzz_diff --output-on-failure
+
+  # ── Windows: Release + benchmark gate ────────────────────────────────
+  windows-bench:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure with bench
+        run: cmake -S . -B build_bench -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DZYAML_BUILD_BENCH=ON
+      - name: Build
+        run: cmake --build build_bench --config Release
+      - name: Run benchmark (Release only)
+        working-directory: build_bench
+        run: ctest -C Release -L bench --output-on-failure
+
+  # ── Linux: Clang + modules (broader compiler coverage) ─────────────
+  linux-clang:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install clang-scan-deps + ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang clang-tools-extra
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++
+      - name: Build
+        run: cmake --build build
+      - name: Test (default suite)
+        working-directory: build
+        run: ctest --output-on-failure -LE bench
