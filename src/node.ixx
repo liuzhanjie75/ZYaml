@@ -229,10 +229,10 @@ public:
 
     [[nodiscard]] const Node* find(std::string_view key) const noexcept {
         if (type_ != NodeType::Map || !map_) return nullptr;
-        // O(1) avg via the side-index. The temporary std::string is one small
-        // allocation; not on the parse hot path (parse uses appendMapEntry
-        // with a std::string key directly).
-        if (auto it = map_->index.find(std::string(key)); it != map_->index.end()) {
+        // O(1) avg via the transparent side-index — no temporary std::string
+        // allocation (the transparent Hash + std::equal_to<> accept
+        // std::string_view directly).
+        if (auto it = map_->index.find(key); it != map_->index.end()) {
             return &map_->entries[it->second].second;
         }
         return nullptr;
@@ -240,7 +240,7 @@ public:
 
     [[nodiscard]] Node* find(std::string_view key) noexcept {
         if (type_ != NodeType::Map || !map_) return nullptr;
-        if (auto it = map_->index.find(std::string(key)); it != map_->index.end()) {
+        if (auto it = map_->index.find(key); it != map_->index.end()) {
             return &map_->entries[it->second].second;
         }
         return nullptr;
@@ -347,7 +347,7 @@ public:
     // Remove a map entry by key. Returns true if found and removed.
     bool remove(std::string_view key) {
         if (type_ != NodeType::Map || !map_) return false;
-        auto it = map_->index.find(std::string(key));
+        auto it = map_->index.find(key);
         if (it == map_->index.end()) return false;
         const std::size_t removed = it->second;
         map_->entries.erase(map_->entries.begin() + static_cast<ptrdiff_t>(removed));
@@ -389,7 +389,18 @@ private:
         // Side-index: key → position in `entries`. Keeps `find`/`appendMapEntry`
         // O(1) avg instead of the linear scan that made parse O(n²) for large
         // maps. Mirrored on every mutation (append/remove/clone).
-        std::unordered_map<std::string, std::size_t> index;
+        //
+        // Transparent hash + transparent eq let find(std::string_view) and
+        // find(const std::string&) share buckets without constructing a
+        // temporary std::string key — important because find() is the
+        // primary read API and the temporary would allocate on every call.
+        struct Hash {
+            using is_transparent = void;
+            [[nodiscard]] std::size_t operator()(std::string_view s) const noexcept {
+                return std::hash<std::string_view>{}(s);
+            }
+        };
+        std::unordered_map<std::string, std::size_t, Hash, std::equal_to<>> index;
     };
     struct SeqStorage {
         std::vector<Node> entries;

@@ -12,7 +12,6 @@
 
 module;
 
-#include <sstream>
 #include <string>
 #include <string_view>
 
@@ -64,35 +63,36 @@ namespace emit_detail {
 
 // Emit a scalar value, quoting if necessary. Uses double quotes with
 // escapes for control chars; otherwise plain.
-void emitScalar(std::ostringstream& out, std::string_view s) {
+void emitScalar(std::string& out, std::string_view s) {
     if (!needsQuoting(s)) {
-        out << s;
+        out.append(s);
         return;
     }
-    out << '"';
+    out.push_back('"');
     for (char c : s) {
         switch (c) {
-            case '\\': out << "\\\\"; break;
-            case '"': out << "\\\""; break;
-            case '\n': out << "\\n"; break;
-            case '\t': out << "\\t"; break;
-            case '\r': out << "\\r"; break;
-            default: out << c; break;
+            case '\\': out.append("\\\\"); break;
+            case '"': out.append("\\\""); break;
+            case '\n': out.append("\\n"); break;
+            case '\t': out.append("\\t"); break;
+            case '\r': out.append("\\r"); break;
+            default: out.push_back(c); break;
         }
     }
-    out << '"';
+    out.push_back('"');
 }
 
 // Emit `n` spaces.
-void indentTo(std::ostringstream& out, std::size_t n) {
-    for (std::size_t i = 0; i < n; ++i) out << ' ';
+void indentTo(std::string& out, std::size_t n) {
+    out.append(n, ' ');
 }
 
 // Emit pre comments (each on its own line, indented to `indent`).
-void emitPre(std::ostringstream& out, const Comments& c, std::size_t indent) {
+void emitPre(std::string& out, const Comments& c, std::size_t indent) {
     for (const auto& line : c.pre) {
         indentTo(out, indent);
-        out << line << '\n';
+        out.append(line);
+        out.push_back('\n');
     }
 }
 
@@ -121,35 +121,43 @@ void emitPre(std::ostringstream& out, const Comments& c, std::size_t indent) {
     return false;
 }
 
-void emitNode(std::ostringstream& out, const Node& node, std::size_t indent);
+void emitNode(std::string& out, const Node& node, std::size_t indent);
 
 // Emit a flow sequence: [a, b, c]
-void emitFlowSeq(std::ostringstream& out, const Node& seq) {
-    out << '[';
+void emitFlowSeq(std::string& out, const Node& seq) {
+    out.push_back('[');
     bool first = true;
     for (const auto& e : seq.elements()) {
-        if (!first) out << ", ";
+        if (!first) out.append(", ");
         first = false;
         emitScalar(out, e.asString());
     }
-    out << ']';
+    out.push_back(']');
 }
 
 // Emit a flow map: {k: v, k: v}
-void emitFlowMap(std::ostringstream& out, const Node& map) {
-    out << '{';
+void emitFlowMap(std::string& out, const Node& map) {
+    out.push_back('{');
     bool first = true;
     for (const auto& item : map.items()) {
-        if (!first) out << ", ";
+        if (!first) out.append(", ");
         first = false;
         emitScalar(out, item.key);
-        out << ": ";
+        out.append(": ");
         emitScalar(out, item.value.asString());
     }
-    out << '}';
+    out.push_back('}');
 }
 
-void emitNode(std::ostringstream& out, const Node& node, std::size_t indent) {
+// Append an inline comment (the trailing "# ..." on a node's own line).
+void emitInline(std::string& out, const std::optional<std::string>& ic) {
+    if (ic) {
+        out.append("  ");
+        out.append(*ic);
+    }
+}
+
+void emitNode(std::string& out, const Node& node, std::size_t indent) {
     emitPre(out, node.comments(), indent);
     // At the root level (indent 0), never emit flow — the parser can't
     // handle a top-level flow collection as the document root. Force block.
@@ -162,85 +170,85 @@ void emitNode(std::ostringstream& out, const Node& node, std::size_t indent) {
     // the only option — allowed even at root for this case.
     if (node.isSequence() && node.size() == 0) {
         indentTo(out, indent);
-        out << "[]";
-        if (node.comments().inline_) out << "  " << *node.comments().inline_;
-        out << '\n';
+        out.append("[]");
+        emitInline(out, node.comments().inline_);
+        out.push_back('\n');
         return;
     }
     if (node.isMap() && node.size() == 0) {
         indentTo(out, indent);
-        out << "{}";
-        if (node.comments().inline_) out << "  " << *node.comments().inline_;
-        out << '\n';
+        out.append("{}");
+        emitInline(out, node.comments().inline_);
+        out.push_back('\n');
         return;
     }
     if (node.isNull()) {
         indentTo(out, indent);
-        out << "null";
-        if (node.comments().inline_) out << "  " << *node.comments().inline_;
-        out << '\n';
+        out.append("null");
+        emitInline(out, node.comments().inline_);
+        out.push_back('\n');
         return;
     }
     if (node.isScalar()) {
         indentTo(out, indent);
         emitScalar(out, node.asString());
-        if (node.comments().inline_) out << "  " << *node.comments().inline_;
-        out << '\n';
+        emitInline(out, node.comments().inline_);
+        out.push_back('\n');
         return;
     }
     if (node.isSequence()) {
         if (shouldFlow(node)) {
             indentTo(out, indent);
             emitFlowSeq(out, node);
-            if (node.comments().inline_) out << "  " << *node.comments().inline_;
-            out << '\n';
+            emitInline(out, node.comments().inline_);
+            out.push_back('\n');
             return;
         }
         for (const auto& e : node.elements()) {
             emitPre(out, e.comments(), indent);
             indentTo(out, indent);
-            out << '-';
-            if (e.isNull()) { out << '\n'; continue; }
+            out.push_back('-');
+            if (e.isNull()) { out.push_back('\n'); continue; }
             if (e.isScalar()) {
-                out << ' ';
+                out.push_back(' ');
                 emitScalar(out, e.asString());
-                if (e.comments().inline_) out << "  " << *e.comments().inline_;
-                out << '\n';
+                emitInline(out, e.comments().inline_);
+                out.push_back('\n');
             } else if (shouldFlow(e)) {
                 // Flow collection inline after '- '.
-                out << ' ';
+                out.push_back(' ');
                 if (e.isSequence()) emitFlowSeq(out, e);
                 else emitFlowMap(out, e);
-                if (e.comments().inline_) out << "  " << *e.comments().inline_;
-                out << '\n';
+                emitInline(out, e.comments().inline_);
+                out.push_back('\n');
             } else {
                 // Nested block under '-'. Emit on the same line as '-' for
                 // a map's first entry (matching scene-file style), then the
                 // rest at indent+2.
-                out << ' ';
+                out.push_back(' ');
                 if (e.isMap() && !shouldFlow(e)) {
                     bool first = true;
                     for (const auto& item : e.items()) {
-                        if (!first) { out << '\n'; indentTo(out, indent + 2); }
+                        if (!first) { out.push_back('\n'); indentTo(out, indent + 2); }
                         first = false;
                         emitScalar(out, item.key);
-                        out << ": ";
+                        out.append(": ");
                         const Node& v = item.value;
                         if (v.isScalar()) {
                             emitScalar(out, v.asString());
-                            if (v.comments().inline_) out << "  " << *v.comments().inline_;
+                            emitInline(out, v.comments().inline_);
                         } else if (v.isNull()) {
-                            out << "null";
+                            out.append("null");
                         } else {
                             // Nested deeper — newline + recursive at indent+2.
-                            out << '\n';
+                            out.push_back('\n');
                             emitNode(out, v, indent + 4);
                             continue;
                         }
                     }
-                    out << '\n';
+                    out.push_back('\n');
                 } else {
-                    out << '\n';
+                    out.push_back('\n');
                     emitNode(out, e, indent + 2);
                 }
             }
@@ -251,33 +259,33 @@ void emitNode(std::ostringstream& out, const Node& node, std::size_t indent) {
         if (shouldFlow(node)) {
             indentTo(out, indent);
             emitFlowMap(out, node);
-            if (node.comments().inline_) out << "  " << *node.comments().inline_;
-            out << '\n';
+            emitInline(out, node.comments().inline_);
+            out.push_back('\n');
             return;
         }
         for (const auto& item : node.items()) {
             emitPre(out, item.value.comments(), indent);
             indentTo(out, indent);
             emitScalar(out, item.key);
-            out << ": ";
+            out.append(": ");
             const Node& v = item.value;
             if (v.isScalar()) {
                 emitScalar(out, v.asString());
-                if (v.comments().inline_) out << "  " << *v.comments().inline_;
-                out << '\n';
+                emitInline(out, v.comments().inline_);
+                out.push_back('\n');
             } else if (v.isNull()) {
-                out << "null";
-                if (v.comments().inline_) out << "  " << *v.comments().inline_;
-                out << '\n';
+                out.append("null");
+                emitInline(out, v.comments().inline_);
+                out.push_back('\n');
             } else if (shouldFlow(v)) {
                 // Flow collection inline on the key's line (matches how
                 // scene files write vectors: position: [1.0, 2.0, 3.0]).
                 if (v.isSequence()) emitFlowSeq(out, v);
                 else emitFlowMap(out, v);
-                if (v.comments().inline_) out << "  " << *v.comments().inline_;
-                out << '\n';
+                emitInline(out, v.comments().inline_);
+                out.push_back('\n');
             } else {
-                out << '\n';
+                out.push_back('\n');
                 emitNode(out, v, indent + 2);
             }
         }
@@ -289,9 +297,12 @@ void emitNode(std::ostringstream& out, const Node& node, std::size_t indent) {
 
 // Public entry: emit a Node tree as YAML text.
 [[nodiscard]] std::string emit(const Node& root) {
-    std::ostringstream out;
+    // Reserve a reasonable starting buffer; std::string grows on demand.
+    // A 1 KiB reserve covers small documents without a realloc.
+    std::string out;
+    out.reserve(1024);
     emit_detail::emitNode(out, root, 0);
-    return out.str();
+    return out;
 }
 
 } // namespace zyaml
