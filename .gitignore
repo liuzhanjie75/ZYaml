@@ -1,6 +1,5 @@
-# Build directories
-build/
-build-*/
+# Build directories — covers build/, build_*/, build-*/ (any build-prefixed dir)
+build*/
 out/
 
 # IDE / editor
