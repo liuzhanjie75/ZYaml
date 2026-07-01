@@ -27,18 +27,11 @@ export module ZYaml:scanner;
 
 import :error;
 
-export namespace zyaml {
-
-// ── Shared quoted-scalar decoders ───────────────────────────────────
-// Single source of truth for escape processing and multi-line folding.
-// Used by both Scanner::readQuoted (block context) and stripFlowQuotes
-// (flow context) so the two paths can't drift.
-
-namespace quote_detail {
-
-// Apply a double-quoted escape sequence. `e` is the char after '\'.
-// Writes the decoded char(s) to `out`. Returns an error for unknown
-// escapes. Inline-able; called from the decode loop below.
+// Internal helper: apply a double-quoted escape sequence. `e` is the char
+// after '\'. Writes the decoded char(s) to `out`. Returns an error for
+// unknown escapes. Not exported — visible only within the module
+// (scanner/parser partitions), not to consumers of `import ZYaml`.
+namespace zyaml::quote_detail {
 [[nodiscard]] inline std::optional<YamlError>
 applyDoubleEscape(char e, std::string& out) {
     switch (e) {
@@ -62,8 +55,14 @@ applyDoubleEscape(char e, std::string& out) {
     }
     return std::nullopt;
 }
+} // namespace zyaml::quote_detail
 
-} // namespace quote_detail
+export namespace zyaml {
+
+// ── Shared quoted-scalar decoders ───────────────────────────────────
+// Single source of truth for escape processing and multi-line folding.
+// Used by both Scanner::readQuoted (block context) and stripFlowQuotes
+// (flow context) so the two paths can't drift.
 
 // Decode a double-quoted scalar's content (the text between the quotes):
 // process escapes and fold multi-line breaks per YAML 1.2. A trailing

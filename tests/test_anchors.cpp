@@ -112,21 +112,24 @@ void test_self_referential_alias_rejected() {
           "self-reference should report UnknownAnchor");
 }
 
-void test_indirect_cycle_rejected() {
-    // &a references &b which references &a — neither is registered when
-    // the first alias resolves. Block context so aliases are actually
-    // resolved (flow-context aliases are a known limitation — see below).
+// A forward alias reference (alias to an anchor defined later in the
+// document) is rejected — ZYaml registers an anchor only after its value
+// is fully parsed, so `*b` before `b:` is defined hits UnknownAnchor.
+// This is the same invariant that prevents circular references.
+void test_forward_alias_reference_rejected() {
+    // *b resolves before &b is registered → UnknownAnchor.
     auto doc = zyaml::parse("a: &a\n  x: *b\nb: &b\n  y: *a\n");
-    CHECK(!doc.has_value(), "indirect cycle should be rejected");
+    CHECK(!doc.has_value(), "forward alias reference should be rejected");
     if (doc.has_value()) return;
     CHECK(doc.error().code == zyaml::YamlErrorCode::UnknownAnchor,
-          "indirect cycle should report UnknownAnchor");
+          "forward reference should report UnknownAnchor");
 }
 
 // Known limitation: aliases inside flow collections are not resolved —
-// `*name` is stored as a plain scalar string. Pin the current behavior so
-// a future fix is a deliberate change, not a silent drift.
-void test_alias_in_flow_collection_is_plain_string() {
+// `*name` is stored as a plain scalar string. This pins the current
+// (buggy) behavior so a future fix is a deliberate change, not silent
+// drift. If you fix flow-context alias resolution, update this test.
+void test_flow_alias_unresolved_known_limitation() {
     auto doc = zyaml::parse("a: &a value\nb: [*a]\n");
     CHECK(doc.has_value(), "flow-with-alias should parse (alias not resolved)");
     if (!doc) return;
@@ -146,8 +149,8 @@ int main() {
     test_duplicate_anchor_errors();
     test_alias_in_sequence();
     test_self_referential_alias_rejected();
-    test_indirect_cycle_rejected();
-    test_alias_in_flow_collection_is_plain_string();
+    test_forward_alias_reference_rejected();
+    test_flow_alias_unresolved_known_limitation();
 
     if (failures == 0) {
         std::cout << "zyaml M8 anchor tests passed\n";
