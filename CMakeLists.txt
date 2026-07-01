@@ -41,6 +41,7 @@ message(STATUS "ZYaml: CMAKE_CXX_SCAN_FOR_MODULES=${CMAKE_CXX_SCAN_FOR_MODULES}"
 
 option(ZYAML_BUILD_TESTS "Build ZYaml unit tests" ON)
 option(ZYAML_BUILD_EXAMPLES "Build ZYaml examples" ON)
+option(ZYAML_BUILD_BENCH "Build ZYaml benchmark" ON)
 
 # Warnings as errors for the library itself; consumers opt in via ZYaml::ZYaml.
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
@@ -77,6 +78,10 @@ endif()
 if(ZYAML_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(ZYAML_BUILD_BENCH)
+    add_subdirectory(bench)
 endif()
 
 if(ZYAML_BUILD_EXAMPLES)
