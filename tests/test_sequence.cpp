@@ -99,12 +99,47 @@ void test_sequence_of_maps() {
     if (n1path) CHECK_EQ(std::string(n1path->asString()), "Assets/helmet.obj", "node 1 path");
 }
 
+void test_nested_seq_with_flow_value() {
+    // "- - [1, 2]" — the inner flow collection must parse as a sequence,
+    // not a plain scalar string "[1, 2]". Previously the nested-seq path
+    // called readScalarValue() which didn't recognize flow collections.
+    constexpr std::string_view yaml = "- - [1, 2]\n";
+    auto doc = zyaml::parse(yaml);
+    if (!doc) { std::cerr << "  [nested-flow] error: " << doc.error().format() << "\n"; }
+    CHECK(doc.has_value(), "nested seq with flow value parse should succeed");
+    if (!doc) return;
+    const auto& r = doc->root();
+    CHECK(r.isSequence(), "root is seq");
+    CHECK_EQ(r.size(), 1u, "1 outer element");
+    CHECK(r[0].isSequence(), "elem 0 is nested seq");
+    CHECK_EQ(r[0].size(), 1u, "nested seq has 1 element");
+    const auto& inner = r[0][0];
+    CHECK(inner.isSequence(), "inner is flow seq");
+    CHECK_EQ(inner.size(), 2u, "flow seq has 2");
+    CHECK_EQ(std::string(inner[0].asString()), "1", "inner[0]");
+    CHECK_EQ(std::string(inner[1].asString()), "2", "inner[1]");
+}
+
+void test_nested_seq_with_flow_map() {
+    constexpr std::string_view yaml = "- - {k: v}\n";
+    auto doc = zyaml::parse(yaml);
+    if (!doc) { std::cerr << "  [nested-flow-map] error: " << doc.error().format() << "\n"; }
+    CHECK(doc.has_value(), "nested seq with flow map parse should succeed");
+    if (!doc) return;
+    const auto& root = doc->root();
+    const auto& inner = root[0][0];
+    CHECK(inner.isMap(), "inner is flow map");
+    CHECK_EQ(std::string(inner.find("k")->asString()), "v", "inner.k");
+}
+
 } // namespace
 
 int main() {
     test_block_sequence_of_scalars();
     test_nested_map_in_map();
     test_sequence_of_maps();
+    test_nested_seq_with_flow_value();
+    test_nested_seq_with_flow_map();
 
     if (failures == 0) {
         std::cout << "zyaml M2 sequence/nesting tests passed\n";

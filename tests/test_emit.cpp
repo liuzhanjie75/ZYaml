@@ -20,30 +20,36 @@ int failures = 0;
 #define CHECK_EQ(a, b, msg) \
     do { auto _va = (a); auto _vb = (b); if (!(_va == _vb)) { std::cerr << "FAIL: " << (msg) << " (got " << _va << ", want " << _vb << ")\n"; ++failures; } } while(0)
 
-// Re-parse and compare scalar values of two maps at the top level.
+// Recursive deep-equality between two nodes (map/seq/scalar/null).
+bool nodesEqual(const zyaml::Node& a, const zyaml::Node& b);
+
 bool mapsEqual(const zyaml::Node& a, const zyaml::Node& b) {
     if (!a.isMap() || !b.isMap()) return false;
     if (a.size() != b.size()) return false;
     for (const auto& item : a.items()) {
         const auto* bv = b.find(item.key);
         if (!bv) return false;
-        if (item.value.isScalar() && bv->isScalar()) {
-            if (std::string(item.value.asString()) != std::string(bv->asString())) return false;
-        } else if (item.value.isMap() && bv->isMap()) {
-            if (!mapsEqual(item.value, *bv)) return false;
-        } else if (item.value.isSequence() && bv->isSequence()) {
-            if (item.value.size() != bv->size()) return false;
-            for (std::size_t i = 0; i < item.value.size(); ++i) {
-                // shallow: scalars only
-                if (item.value[i].isScalar() && bv->operator[](i).isScalar()) {
-                    if (std::string(item.value[i].asString()) != std::string(bv->operator[](i).asString())) return false;
-                }
-            }
-        } else {
-            return false;
-        }
+        if (!nodesEqual(item.value, *bv)) return false;
     }
     return true;
+}
+
+bool seqsEqual(const zyaml::Node& a, const zyaml::Node& b) {
+    if (!a.isSequence() || !b.isSequence()) return false;
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        if (!nodesEqual(a[i], b[i])) return false;
+    }
+    return true;
+}
+
+bool nodesEqual(const zyaml::Node& a, const zyaml::Node& b) {
+    if (a.isNull() && b.isNull()) return true;
+    if (a.isScalar() && b.isScalar())
+        return std::string(a.asString()) == std::string(b.asString());
+    if (a.isMap() && b.isMap()) return mapsEqual(a, b);
+    if (a.isSequence() && b.isSequence()) return seqsEqual(a, b);
+    return false;
 }
 
 void test_emit_simple_map() {

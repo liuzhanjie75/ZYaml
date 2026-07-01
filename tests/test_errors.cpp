@@ -25,7 +25,7 @@ int failures = 0;
 void test_bad_indent_error() {
     auto doc = zyaml::parse("a: 1\n b: 2\n");  // inconsistent indent
     CHECK(!doc.has_value(), "bad indent should error");
-    if (!doc.has_value()) return;
+    if (doc.has_value()) return;
     CHECK(doc.error().code == zyaml::YamlErrorCode::BadIndent,
           "error code should be BadIndent");
     CHECK(doc.error().where.line > 0, "error has a line number");
@@ -53,6 +53,25 @@ void test_bad_escape_error() {
     if (doc.has_value()) return;
     CHECK(doc.error().code == zyaml::YamlErrorCode::BadEscape,
           "error code should be BadEscape");
+}
+
+// A bad escape inside a flow collection must error the same way as a
+// top-level quoted scalar — previously stripFlowQuotes silently copied
+// the unknown escape char, so ["bad \q"] parsed where "bad \q" alone errored.
+void test_bad_escape_in_flow_seq() {
+    auto doc = zyaml::parse(R"(s: ["bad \q"])");
+    CHECK(!doc.has_value(), "bad escape in flow seq should error");
+    if (doc.has_value()) return;
+    CHECK(doc.error().code == zyaml::YamlErrorCode::BadEscape,
+          "flow seq bad escape code should be BadEscape");
+}
+
+void test_bad_escape_in_flow_map() {
+    auto doc = zyaml::parse(R"(s: {k: "bad \q"})");
+    CHECK(!doc.has_value(), "bad escape in flow map should error");
+    if (doc.has_value()) return;
+    CHECK(doc.error().code == zyaml::YamlErrorCode::BadEscape,
+          "flow map bad escape code should be BadEscape");
 }
 
 void test_unknown_anchor_error() {
@@ -146,6 +165,18 @@ void test_multi_doc_with_end_markers() {
     CHECK_EQ(docs.size(), 2u, "2 documents");
 }
 
+void test_multi_doc_rejects_mixed_map_seq() {
+    // A single document with mixed map/seq at the same indent is invalid.
+    // parse() rejects it; parseMultiDoc must NOT silently split it into two
+    // docs (a: 1 / - lost) — that would drop the structural error.
+    std::vector<zyaml::YamlDoc> docs;
+    auto err = zyaml::parseMultiDoc("a: 1\n- lost\n", docs);
+    CHECK(err.has_value(), "parseMultiDoc should reject mixed map/seq");
+    if (!err) return;
+    CHECK(err->code == zyaml::YamlErrorCode::UnexpectedToken,
+          "mixed map/seq error code should be UnexpectedToken");
+}
+
 } // namespace
 
 int main() {
@@ -153,6 +184,8 @@ int main() {
     test_unclosed_quote_error();
     test_unclosed_flow_error();
     test_bad_escape_error();
+    test_bad_escape_in_flow_seq();
+    test_bad_escape_in_flow_map();
     test_unknown_anchor_error();
     test_duplicate_anchor_error();
     test_mixed_map_seq_error();
@@ -162,6 +195,7 @@ int main() {
     test_doc_end_marker();
     test_multi_document();
     test_multi_doc_with_end_markers();
+    test_multi_doc_rejects_mixed_map_seq();
 
     if (failures == 0) {
         std::cout << "zyaml M11 error/multidoc tests passed\n";

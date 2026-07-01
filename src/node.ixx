@@ -10,12 +10,12 @@ module;
 
 #include <charconv>
 #include <cstddef>
-#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -35,12 +35,10 @@ enum class NodeType {
 // Comment model: comments attached to a Node at parse time. `pre` holds
 // full comment lines preceding the node (one entry per line, including
 // the leading '#'). `inline_` holds the trailing "# ..." on the node's
-// own start line (None if absent). `post` (lines after, before the next
-// sibling) is reserved for a later refinement.
+// own start line (None if absent).
 struct Comments {
     std::vector<std::string> pre;
     std::optional<std::string> inline_;
-    std::vector<std::string> post;  // unused in M6; reserved
 };
 
 // Bool conversion (YAML 1.2 core + 1.1 spellings). Defined before Node
@@ -67,11 +65,9 @@ class Node {
 public:
     Node() = default;
 
-    // Nodes are NOT copyable by default — map/sequence storage lives in a
-    // shared_ptr, so an implicit copy would alias the same backing storage
-    // and a mutation through one Node would silently affect its copies.
-    // Use clone() for an independent deep copy, or move for ownership
-    // transfer. This makes the shared-ownership semantics explicit.
+    // Nodes are NOT copyable — deep copy is expensive (map/sequence storage
+    // plus all children), so it must be explicit via `clone()`. Move is
+    // defaulted (cheap pointer swaps into the optional storage).
     Node(const Node&) = delete;
     Node& operator=(const Node&) = delete;
     Node(Node&&) noexcept = default;
@@ -86,14 +82,19 @@ public:
         n.comments_ = comments_;
         n.tag_ = tag_;
         if (map_) {
-            n.map_ = std::make_shared<MapStorage>();
+            n.map_.emplace();
             n.map_->entries.reserve(map_->entries.size());
             for (const auto& [k, v] : map_->entries) {
                 n.map_->entries.emplace_back(k, v.clone());
             }
+            // Rebuild the side-index in the clone.
+            n.map_->index.reserve(n.map_->entries.size());
+            for (std::size_t idx = 0; idx < n.map_->entries.size(); ++idx) {
+                n.map_->index.emplace(n.map_->entries[idx].first, idx);
+            }
         }
         if (seq_) {
-            n.seq_ = std::make_shared<SeqStorage>();
+            n.seq_.emplace();
             n.seq_->entries.reserve(seq_->entries.size());
             for (const auto& e : seq_->entries) {
                 n.seq_->entries.push_back(e.clone());
@@ -128,14 +129,14 @@ public:
     [[nodiscard]] static Node makeMap() {
         Node n;
         n.type_ = NodeType::Map;
-        n.map_ = std::make_shared<MapStorage>();
+        n.map_.emplace();
         return n;
     }
 
     [[nodiscard]] static Node makeSequence() {
         Node n;
         n.type_ = NodeType::Sequence;
-        n.seq_ = std::make_shared<SeqStorage>();
+        n.seq_.emplace();
         return n;
     }
 
@@ -228,16 +229,19 @@ public:
 
     [[nodiscard]] const Node* find(std::string_view key) const noexcept {
         if (type_ != NodeType::Map || !map_) return nullptr;
-        for (const auto& [k, v] : map_->entries) {
-            if (k == key) return &v;
+        // O(1) avg via the side-index. The temporary std::string is one small
+        // allocation; not on the parse hot path (parse uses appendMapEntry
+        // with a std::string key directly).
+        if (auto it = map_->index.find(std::string(key)); it != map_->index.end()) {
+            return &map_->entries[it->second].second;
         }
         return nullptr;
     }
 
     [[nodiscard]] Node* find(std::string_view key) noexcept {
         if (type_ != NodeType::Map || !map_) return nullptr;
-        for (auto& [k, v] : map_->entries) {
-            if (k == key) return &v;
+        if (auto it = map_->index.find(std::string(key)); it != map_->index.end()) {
+            return &map_->entries[it->second].second;
         }
         return nullptr;
     }
@@ -343,13 +347,17 @@ public:
     // Remove a map entry by key. Returns true if found and removed.
     bool remove(std::string_view key) {
         if (type_ != NodeType::Map || !map_) return false;
-        for (auto it = map_->entries.begin(); it != map_->entries.end(); ++it) {
-            if (it->first == key) {
-                map_->entries.erase(it);
-                return true;
-            }
+        auto it = map_->index.find(std::string(key));
+        if (it == map_->index.end()) return false;
+        const std::size_t removed = it->second;
+        map_->entries.erase(map_->entries.begin() + static_cast<ptrdiff_t>(removed));
+        // Rebuild the index: every entry after `removed` shifted down by 1.
+        map_->index.clear();
+        map_->index.reserve(map_->entries.size());
+        for (std::size_t idx = 0; idx < map_->entries.size(); ++idx) {
+            map_->index.emplace(map_->entries[idx].first, idx);
         }
-        return false;
+        return true;
     }
 
     // Remove a sequence element by index. Returns true if in range.
@@ -363,20 +371,25 @@ public:
     // Internal: used by the parser to append a map entry. If the key already
     // exists (from a merge or duplicate), the later value replaces it —
     // matching YAML's "last key wins" and "explicit overrides merge" rules.
+    // O(1) avg via the side-index.
     void appendMapEntry(std::string key, Node value) {
         ensureMap();
-        for (auto& [k, v] : map_->entries) {
-            if (k == key) {
-                v = std::move(value);
-                return;
-            }
+        if (auto it = map_->index.find(key); it != map_->index.end()) {
+            map_->entries[it->second].second = std::move(value);
+            return;
         }
-        map_->entries.emplace_back(std::move(key), std::move(value));
+        std::size_t idx = map_->entries.size();
+        map_->entries.emplace_back(key, std::move(value));
+        map_->index.emplace(std::move(key), idx);
     }
 
 private:
     struct MapStorage {
         std::vector<std::pair<std::string, Node>> entries;
+        // Side-index: key → position in `entries`. Keeps `find`/`appendMapEntry`
+        // O(1) avg instead of the linear scan that made parse O(n²) for large
+        // maps. Mirrored on every mutation (append/remove/clone).
+        std::unordered_map<std::string, std::size_t> index;
     };
     struct SeqStorage {
         std::vector<Node> entries;
@@ -385,25 +398,25 @@ private:
     void ensureMap() {
         if (type_ != NodeType::Map) {
             type_ = NodeType::Map;
-            map_ = std::make_shared<MapStorage>();
+            map_.emplace();
         } else if (!map_) {
-            map_ = std::make_shared<MapStorage>();
+            map_.emplace();
         }
     }
 
     void ensureSequence() {
         if (type_ != NodeType::Sequence) {
             type_ = NodeType::Sequence;
-            seq_ = std::make_shared<SeqStorage>();
+            seq_.emplace();
         } else if (!seq_) {
-            seq_ = std::make_shared<SeqStorage>();
+            seq_.emplace();
         }
     }
 
     NodeType type_ = NodeType::Null;
     std::string scalar_;
-    std::shared_ptr<MapStorage> map_;
-    std::shared_ptr<SeqStorage> seq_;
+    std::optional<MapStorage> map_;
+    std::optional<SeqStorage> seq_;
     Comments comments_;
     std::optional<std::string> tag_;  // YAML tag like "!str" — preserved but not interpreted
 };

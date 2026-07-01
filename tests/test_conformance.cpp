@@ -235,16 +235,16 @@ void test_round_trip_complex() {
     CHECK(lights != nullptr && lights->isSequence(), "lights seq");
     CHECK_EQ(lights->size(), 2u, "2 lights");
     CHECK(std::string((*lights)[0].find("type")->asString()) == "directional", "light 0 type");
-    // Emit + re-parse: round-trip should preserve structure. If the
-    // emitter can't handle some shape (known gap), this is documented.
+    // Emit + re-parse: round-trip must preserve structure.
     std::string out = zyaml::emit(doc->root());
     auto re = zyaml::parse(out);
-    if (!re.has_value()) {
-        std::cerr << "  [skip] round-trip emit→parse gap (known limitation)\n";
-        return;  // not a hard failure for M12
-    }
+    CHECK(re.has_value(), "round-trip emit→parse must succeed");
+    if (!re) return;
     CHECK(re->root().find("camera") != nullptr, "rt: camera");
     CHECK(re->root().find("lights") != nullptr, "rt: lights");
+    CHECK_EQ(re->root().find("lights")->size(), 2u, "rt: 2 lights preserved");
+    CHECK(std::string((*re->root().find("lights"))[0].find("type")->asString()) == "directional",
+          "rt: light 0 type preserved");
 }
 
 void test_node_remove() {

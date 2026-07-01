@@ -3,7 +3,6 @@
 module;
 
 #include <cstddef>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -16,8 +15,6 @@ struct Location {
     std::size_t line = 0;     // 1-based
     std::size_t column = 0;   // 1-based
     std::size_t offset = 0;  // 0-based byte offset into source
-
-    [[nodiscard]] bool operator==(const Location& other) const noexcept = default;
 };
 
 enum class YamlErrorCode {
@@ -41,7 +38,6 @@ struct YamlError {
     YamlErrorCode code = YamlErrorCode::UnexpectedToken;
     Location where{};
     std::string message;
-    std::optional<Location> context;  // e.g. anchor definition site for alias errors
 
     YamlError() = default;
     YamlError(YamlErrorCode c, Location w, std::string m)

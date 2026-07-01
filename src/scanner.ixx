@@ -17,7 +17,6 @@
 module;
 
 #include <cstddef>
-#include <expected>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -43,13 +42,6 @@ enum class TokenType {
     EndOfInput,
 };
 
-// Style hint for a Scalar / FlowCollection token.
-enum class TokenStyle {
-    Plain,
-    FlowSeq,   // text is "[a, b, c]" (brackets included)
-    FlowMap,   // text is "{k: v, ...}" (braces included)
-};
-
 struct Token {
     TokenType type = TokenType::EndOfInput;
     std::string text;     // scalar text; key text for MapEntry; empty for SeqEntry;
@@ -59,7 +51,6 @@ struct Token {
     std::size_t column = 1;
     std::size_t offset = 0;
     std::size_t indent = 0;
-    TokenStyle style = TokenStyle::Plain;
     bool isInline = false;  // Comment: true if trailing on a value's own line
 };
 
@@ -69,6 +60,9 @@ public:
 
     [[nodiscard]] Result<std::vector<Token>> scanAll() {
         std::vector<Token> tokens;
+        // Rough estimate: one token per ~16 source bytes (a typical YAML
+        // line). Avoids repeated realloc during large parses.
+        tokens.reserve(source_.size() / 16);
         // When non-null, we're emitting tokens that continue a "- " entry on
         // the same line; their logical indent is the column right after "- ".
         // This makes `  - name: floor` parse as: SeqEntry@2, MapEntry@4
@@ -85,38 +79,20 @@ public:
     if (!_r_##name) return _r_##name.error(); \
     std::string name = std::move(*_r_##name)
 
-// ZE_EMIT_ANCHOR_ALIAS: at a value position, if the next char is '&', '*',
-// or '!', emit an Anchor/Alias/Tag token and skip spaces. Returns true if
-// the line ended (no inline value follows — caller should skip to next
-// iteration). The caller checks the return and continues the loop.
-#define ZE_EMIT_ANCHOR_ALIAS(tokIndent, _didContinue) \
-    _didContinue = false; \
-    if (peek() == '&' || peek() == '*') { \
-        auto _aa = readAnchorOrAlias(); \
-        Token _at{(_aa.first ? TokenType::Alias : TokenType::Anchor), \
-                  std::move(_aa.second), line_, column_, pos_, (tokIndent)}; \
-        tokens.push_back(_at); \
-        skipSpaces(); \
-        if (atEnd() || peek() == '\n' || peek() == '\r') { \
-            emitTrailingComment(tokens, (tokIndent)); \
-            inlineIndent.reset(); \
-            _didContinue = true; \
-        } \
-    } else if (peek() == '!') { \
-        std::string _tg = readTag(); \
-        Token _tt{TokenType::Tag, std::move(_tg), line_, column_, pos_, (tokIndent)}; \
-        tokens.push_back(_tt); \
-        skipSpaces(); \
-        if (atEnd() || peek() == '\n' || peek() == '\r') { \
-            emitTrailingComment(tokens, (tokIndent)); \
-            inlineIndent.reset(); \
-            _didContinue = true; \
-        } \
-    }
-
         while (!atEnd()) {
             skipBlankLines();
             if (atEnd()) break;
+            // YAML 1.2 forbids tabs for indentation. A tab at the start of
+            // a content line is a BadIndent error.
+            {
+                std::size_t p = pos_;
+                while (p < source_.size() && source_[p] == ' ') ++p;
+                if (p < source_.size() && source_[p] == '\t') {
+                    return YamlError{YamlErrorCode::BadIndent,
+                                     {line_, column_, pos_},
+                                     "tab character used for indentation"};
+                }
+            }
             std::size_t indent = currentLineIndent();
             if (inlineIndent) indent = *inlineIndent;
             skipSpaces();
@@ -132,14 +108,20 @@ public:
                 inlineIndent.reset();
                 continue;
             }
-            // Document start marker ---.
-            if (peek() == '-' && peekAt(1) == '-' && peekAt(2) == '-') {
-                advance(); advance(); advance();
-                skipToEndOfLine();
-                Token t{TokenType::DocStart, {}, line_, column_, pos_, indent};
-                tokens.push_back(t);
-                inlineIndent.reset();
-                continue;
+            // Document start marker ---. Must be at column 0 (indent == 0)
+            // AND followed by whitespace/EOL — "---foo" is a plain scalar,
+            // not a doc marker. Otherwise the marker silently eats content.
+            if (indent == 0 && peek() == '-' && peekAt(1) == '-' && peekAt(2) == '-') {
+                const char after = peekAt(3);
+                if (after == ' ' || after == '\t' || after == '\n' ||
+                    after == '\r' || after == '\0') {
+                    advance(); advance(); advance();
+                    skipToEndOfLine();
+                    Token t{TokenType::DocStart, {}, line_, column_, pos_, indent};
+                    tokens.push_back(t);
+                    inlineIndent.reset();
+                    continue;
+                }
             }
             // Block sequence entry: "- " (or "-" at EOL).
             if (peek() == '-' && (peekAt(1) == ' ' || peekAt(1) == '\t' ||
@@ -151,8 +133,7 @@ public:
                 tokens.push_back(t);
                 // Optional inline value on the same line.
                 if (!atEnd() && peek() != '\n' && peek() != '\r') {
-                    bool _dc; ZE_EMIT_ANCHOR_ALIAS(*inlineIndent, _dc);
-                    if (_dc) continue;
+                    if (emitAnchorAliasTag(tokens, *inlineIndent, inlineIndent)) continue;
                     if (peek() == '|' || peek() == '>') {
                         ZE_READ(bs, readBlockScalar(indent));
                         Token v{TokenType::Scalar, std::move(bs), line_, column_, pos_, indent};
@@ -160,20 +141,24 @@ public:
                         inlineIndent.reset();
                         continue;
                     }
+                    // Inline flow collection as the seq element value.
+                    if (peek() == '[' || peek() == '{') {
+                        ZE_READ(raw, readFlowCollection());
+                        Token v{TokenType::FlowCollection, std::move(raw),
+                                line_, column_, pos_, *inlineIndent};
+                        tokens.push_back(v);
+                        emitTrailingComment(tokens, indent);
+                        inlineIndent.reset();
+                        continue;
+                    }
                     // Nested seq: "- - a" — the second '-' is another SeqEntry
                     // at the inlineIndent. Emit it; the parser handles it as
-                    // a nested block.
+                    // a nested block. The inline value dispatch mirrors the
+                    // outer seq-entry path so flow/block/anchor values are
+                    // recognized (previously this called readScalarValue()
+                    // directly, mis-reading "- - [1, 2]" as a plain scalar).
                     if (peek() == '-' && (peekAt(1) == ' ' || peekAt(1) == '\t' ||
                                           peekAt(1) == '\n' || peekAt(1) == '\r' || atEndAfter(1))) {
-                        // Don't consume here — let the main loop handle it on
-                        // the next iteration with inlineIndent active.
-                        // The current SeqEntry token is already pushed; the
-                        // parser's parseBlock will see the next SeqEntry at
-                        // deeper indent and treat it as a nested block.
-                        // For this to work, we need to emit a SeqEntry token
-                        // for the nested dash. Fall through to the main loop
-                        // by NOT consuming and continuing.
-                        // Actually, we need to advance and emit it:
                         advance();  // consume second '-'
                         std::size_t nestedIndent = column_;
                         skipSpaces();
@@ -181,9 +166,23 @@ public:
                         tokens.push_back(nt);
                         // Read inline value for the nested seq entry.
                         if (!atEnd() && peek() != '\n' && peek() != '\r') {
-                            ZE_READ(ns, readScalarValue());
-                            Token nv{TokenType::Scalar, std::move(ns), line_, column_, pos_, nestedIndent};
-                            tokens.push_back(nv);
+                            if (emitAnchorAliasTag(tokens, nestedIndent, inlineIndent)) continue;
+                            if (peek() == '|' || peek() == '>') {
+                                ZE_READ(bs, readBlockScalar(*inlineIndent));
+                                Token nv{TokenType::Scalar, std::move(bs), line_, column_, pos_, nestedIndent};
+                                tokens.push_back(nv);
+                            } else if (peek() == '[' || peek() == '{') {
+                                ZE_READ(raw, readFlowCollection());
+                                Token nv{TokenType::FlowCollection, std::move(raw),
+                                         line_, column_, pos_, nestedIndent};
+                                tokens.push_back(nv);
+                            } else {
+                                ZE_READ(ns, readScalarValue());
+                                if (!ns.empty()) {
+                                    Token nv{TokenType::Scalar, std::move(ns), line_, column_, pos_, nestedIndent};
+                                    tokens.push_back(nv);
+                                }
+                            }
                         }
                         emitTrailingComment(tokens, *inlineIndent);
                         inlineIndent.reset();
@@ -197,8 +196,7 @@ public:
                         tokens.push_back(me);
                         skipSpaces();
                         if (!atEnd() && peek() != '\n' && peek() != '\r') {
-                            bool _dc2; ZE_EMIT_ANCHOR_ALIAS(*inlineIndent, _dc2);
-                            if (_dc2) continue;
+                            if (emitAnchorAliasTag(tokens, *inlineIndent, inlineIndent)) continue;
                             ZE_READ(val, readScalarValue());
                             if (!val.empty()) {
                                 Token v{TokenType::Scalar, std::move(val), line_, column_, pos_, *inlineIndent};
@@ -216,12 +214,9 @@ public:
             }
             // Otherwise: a scalar, a flow collection, or a standalone value.
             if (peek() == '[' || peek() == '{') {
-                const char open = peek();
-                TokenStyle style = (open == '[') ? TokenStyle::FlowSeq : TokenStyle::FlowMap;
                 ZE_READ(raw, readFlowCollection());
-                Token t{.type = TokenType::FlowCollection, .text = std::move(raw),
-                        .line = line_, .column = column_, .offset = pos_, .indent = indent,
-                        .style = style};
+                Token t{TokenType::FlowCollection, std::move(raw),
+                        line_, column_, pos_, indent};
                 tokens.push_back(t);
                 skipToEndOfLine();
                 inlineIndent.reset();
@@ -235,8 +230,7 @@ public:
                 tokens.push_back(t);
                 skipSpaces();
                 if (!atEnd() && peek() != '\n' && peek() != '\r') {
-                    bool _dc3; ZE_EMIT_ANCHOR_ALIAS(indent, _dc3);
-                    if (_dc3) continue;
+                    if (emitAnchorAliasTag(tokens, indent, inlineIndent)) continue;
                     if (peek() == '|' || peek() == '>') {
                         ZE_READ(bs, readBlockScalar(indent));
                         Token v{TokenType::Scalar, std::move(bs), line_, column_, pos_, indent};
@@ -245,12 +239,9 @@ public:
                         continue;
                     }
                     if (peek() == '[' || peek() == '{') {
-                        const char open = peek();
-                        TokenStyle vstyle = (open == '[') ? TokenStyle::FlowSeq : TokenStyle::FlowMap;
                         ZE_READ(raw, readFlowCollection());
-                        Token v{.type = TokenType::FlowCollection, .text = std::move(raw),
-                                .line = line_, .column = column_, .offset = pos_, .indent = indent,
-                                .style = vstyle};
+                        Token v{TokenType::FlowCollection, std::move(raw),
+                                line_, column_, pos_, indent};
                         tokens.push_back(v);
                     } else {
                         ZE_READ(val, readScalarValue());
@@ -269,7 +260,6 @@ public:
             inlineIndent.reset();
         }
 #undef ZE_READ
-#undef ZE_EMIT_ANCHOR_ALIAS
         tokens.push_back(Token{TokenType::EndOfInput, {}, line_, column_, pos_, 0});
         return tokens;
     }
@@ -312,11 +302,16 @@ private:
             if (atEnd()) return;
             if (peek() == '\n') { advance(); continue; }
             if (peek() == '\r' && peekAt(1) == '\n') { advance(); advance(); continue; }
-            // Skip ... (doc end) markers.
+            // Skip ... (doc end) markers. Must be followed by whitespace/EOL
+            // — "...foo" is a plain scalar, not a doc-end marker.
             if (peek() == '.' && peekAt(1) == '.' && peekAt(2) == '.') {
-                advance(); advance(); advance();
-                skipToEndOfLine();
-                continue;
+                const char after = peekAt(3);
+                if (after == ' ' || after == '\t' || after == '\n' ||
+                    after == '\r' || after == '\0') {
+                    advance(); advance(); advance();
+                    skipToEndOfLine();
+                    continue;
+                }
             }
             // Non-blank content (including '#' and '---') — restore and stop.
             pos_ = save; line_ = saveline; column_ = savecol;
@@ -365,6 +360,32 @@ private:
         skipToEndOfLine();
     }
 
+    // At a value position, if the next char is '&'/'*'/'!', emit an Anchor
+    // / Alias / Tag token, skip spaces, and if the line then ends, emit the
+    // trailing comment and clear inlineIndent. Returns true if the line
+    // ended (caller should `continue` the main loop); false if a value may
+    // follow on the same line.
+    bool emitAnchorAliasTag(std::vector<Token>& tokens, std::size_t indent,
+                            std::optional<std::size_t>& inlineIndent) {
+        if (peek() != '&' && peek() != '*' && peek() != '!') return false;
+        if (peek() == '&' || peek() == '*') {
+            auto aa = readAnchorOrAlias();
+            tokens.push_back(Token{aa.first ? TokenType::Alias : TokenType::Anchor,
+                                    std::move(aa.second), line_, column_, pos_, indent});
+        } else {
+            std::string tg = readTag();
+            tokens.push_back(Token{TokenType::Tag, std::move(tg),
+                                    line_, column_, pos_, indent});
+        }
+        skipSpaces();
+        if (atEnd() || peek() == '\n' || peek() == '\r') {
+            emitTrailingComment(tokens, indent);
+            inlineIndent.reset();
+            return true;
+        }
+        return false;
+    }
+
     // Read a block scalar (| literal or > folded). Caller positioned at | or >.
     // parentIndent is the indent of the key/entry this block belongs to.
     // The block content lives on subsequent lines at indent > parentIndent.
@@ -384,15 +405,10 @@ private:
             if (c >= '0' && c <= '9') { explicitIndent = explicitIndent * 10 + (c - '0'); hasExplicitIndent = true; advance(); continue; }
             break;
         }
-        // Consume rest of indicator line (may have inline comment).
+        // Consume rest of indicator line (may have an inline comment, which
+        // we don't emit — block scalar comment handling is a later refinement).
         skipSpaces();
-        if (peek() == '#') {
-            // Skip inline comment on the indicator line — don't emit it
-            // (block scalar comment handling is a later refinement).
-            skipToEndOfLine();
-        } else {
-            skipToEndOfLine();
-        }
+        skipToEndOfLine();
 
         // Read content lines until we hit a line at indent <= parentIndent.
         // The block indent is determined by the first non-empty content line
@@ -410,16 +426,14 @@ private:
             bool isBlank = (pos_ + li >= source_.size()) ||
                            source_[pos_ + li] == '\n' || source_[pos_ + li] == '\r';
             if (isBlank) {
-                // Blank lines are part of the block if we haven't determined
-                // the end yet. But if the line has fewer spaces than blockIndent
-                // AND it's truly empty (just \n), it might end the block.
+                // Once the block indent is known, blank lines are part of the
+                // block (kept as empty entries for folding). Before that,
+                // leading blank lines are skipped.
                 if (indentDetermined) {
                     lines.push_back("");  // blank line
-                    // Consume the blank line.
                     while (!atEnd() && peek() != '\n') advance();
                     if (!atEnd() && peek() == '\n') advance();
                 } else {
-                    // Skip blank lines before content starts.
                     while (!atEnd() && peek() != '\n') advance();
                     if (!atEnd() && peek() == '\n') advance();
                 }
@@ -533,7 +547,24 @@ private:
         std::size_t start = pos_;
         while (!atEnd()) {
             const char c = peek();
-            if (c == ':' || c == '#' || c == '\n' || c == '\r') break;
+            // ':' ends a plain scalar only when followed by space, tab, EOL,
+            // or a flow indicator (YAML 1.2). Otherwise it's part of the
+            // scalar text (e.g. "a:b", "https://x").
+            if (c == ':') {
+                const char n = peekAt(1);
+                if (n == ' ' || n == '\t' || n == '\n' || n == '\r' ||
+                    n == ',' || n == ']' || n == '}' || n == '\0') break;
+                advance();
+                continue;
+            }
+            // '#' ends a plain scalar only when preceded by whitespace (it's
+            // an inline comment then). A '#' embedded mid-token stays.
+            if (c == '#') {
+                if (pos_ == start || source_[pos_ - 1] == ' ' || source_[pos_ - 1] == '\t') break;
+                advance();
+                continue;
+            }
+            if (c == '\n' || c == '\r') break;
             advance();
         }
         std::string s(source_.substr(start, pos_ - start));
@@ -543,10 +574,11 @@ private:
 
     // Read a quoted scalar starting at the current '"' or '\''. Returns the
     // decoded content (escapes processed). Advances past the closing quote.
-    // Double-quoted honors \n \t \r \\ \" \' \0 \a \b \f \v \e; unknown
-    // escapes are a BadEscape error (YAML spec). Reaching EOF or newline
-    // without a closing quote is an UnclosedQuote error — the legacy
-    // library silently returned partial text.
+    // Multi-line quoted scalars are supported per YAML 1.2: line breaks are
+    // folded to spaces (single-quoted) or to spaces / nothing at all when
+    // escaped with a trailing backslash (double-quoted). Unknown escapes
+    // are a BadEscape error. Reaching EOF without a closing quote is an
+    // UnclosedQuote error.
     [[nodiscard]] Result<std::string> readQuoted() {
         const std::size_t startLine = line_;
         const std::size_t startCol = column_;
@@ -557,12 +589,45 @@ private:
         bool closed = false;
         while (!atEnd()) {
             const char c = peek();
-            if (c == '\n' || c == '\r') break;  // unterminated on this line
+            // Line break inside a quoted scalar: fold per YAML 1.2.
+            if (c == '\n' || c == '\r') {
+                // Double-quoted with trailing backslash: the backslash already
+                // consumed a line break as "no content" — skip leading
+                // whitespace of the next line and emit nothing.
+                if (quote == '"' && !out.empty() && out.back() == '\x01') {
+                    out.pop_back();  // remove the sentinel we stored at the `\`
+                    advance();  // consume the newline
+                    if (peek() == '\r') { advance(); if (peek() == '\n') advance(); }
+                    else if (peek() == '\n') { advance(); }
+                    // Skip leading whitespace of the continuation line.
+                    while (peek() == ' ' || peek() == '\t') advance();
+                    continue;
+                }
+                // Otherwise fold the line break to a single space (both
+                // quote styles). Consume \r\n or \n. Trim trailing spaces
+                // on the current line and leading spaces on the next.
+                // Drop trailing spaces/tabs already appended.
+                while (!out.empty() && (out.back() == ' ' || out.back() == '\t')) out.pop_back();
+                advance();  // consume the newline char (\n or \r)
+                if (peek() == '\r') { advance(); if (peek() == '\n') advance(); }
+                else if (peek() == '\n') { advance(); }
+                while (peek() == ' ' || peek() == '\t') advance();
+                if (!out.empty() && out.back() != ' ') out += ' ';
+                continue;
+            }
             if (quote == '"') {
                 if (c == '"') { advance(); closed = true; break; }
                 if (c == '\\' && !atEndAfter(1)) {
-                    advance();
-                    const char e = peek();
+                    const char e = peekAt(1);
+                    // Trailing backslash at end of line → line continuation
+                    // (fold to nothing). We store a sentinel byte so the
+                    // line-break handler above can detect it.
+                    if (e == '\n' || e == '\r') {
+                        out += '\x01';  // sentinel for "continuation pending"
+                        advance();  // consume '\'
+                        continue;
+                    }
+                    advance();  // consume '\'
                     switch (e) {
                         case 'n': out += '\n'; break;
                         case 't': out += '\t'; break;
@@ -619,11 +684,12 @@ private:
     }
 
     // Read a complete flow collection starting at the current '[' or '{',
-    // including nested collections and quoted strings. Returns the raw text
-    // with the outer brackets/braces included. A flow collection that
-    // reaches EOF or a newline without a matching close is an UnclosedFlow
-    // error — previously it returned the truncated text and the parser
-    // silently accepted it as an empty/partial collection.
+    // including nested collections, quoted strings, and line breaks (YAML
+    // 1.2 allows multi-line flow). Returns the raw text with the outer
+    // brackets/braces included. A flow collection that reaches EOF without a
+    // matching close is an UnclosedFlow error. Mismatched close brackets
+    // (e.g. '[1, {a: 2]]') are rejected via an opener stack rather than a
+    // bare depth counter, so the error type points at the real problem.
     [[nodiscard]] Result<std::string> readFlowCollection() {
         const std::size_t startLine = line_;
         const std::size_t startCol = column_;
@@ -632,7 +698,11 @@ private:
         const char open = peek();
         const char close = (open == '[') ? ']' : '}';
         advance();  // consume the outer open; it's not a nested opener
-        int depth = 0;  // count of NESTED openers still unmatched
+        // Opener stack: each entry is the expected close for that level.
+        // Grows with nesting depth — no semantic cap (YAML allows arbitrary
+        // nesting). reserve(8) covers the common case without heap traffic.
+        std::vector<char> stack;
+        stack.reserve(8);
         char quote = 0;
         bool closed = false;
         while (!atEnd()) {
@@ -644,13 +714,24 @@ private:
                 continue;
             }
             if (c == '"' || c == '\'') { quote = c; advance(); continue; }
-            if (c == '[' || c == '{') { ++depth; advance(); continue; }
-            if (c == ']' || c == '}') {
-                if (depth > 0) { --depth; advance(); continue; }  // closes a nested opener
-                if (c == close) { advance(); closed = true; break; }  // closes the outer
-                break;  // mismatched close (e.g. ']' when '}' expected)
+            if (c == '[' || c == '{') {
+                stack.push_back((c == '[') ? ']' : '}');
+                advance();
+                continue;
             }
-            if (c == '\n' || c == '\r') break;  // single-line flow only
+            if (c == ']' || c == '}') {
+                if (!stack.empty()) {
+                    // Closing a nested opener — must match the expected type.
+                    if (stack.back() != c) break;  // mismatched close
+                    stack.pop_back();
+                    advance();
+                    continue;
+                }
+                if (c == close) { advance(); closed = true; break; }  // closes the outer
+                break;  // mismatched close at the outer level
+            }
+            // Newlines and other characters are part of the raw text —
+            // multi-line flow collections are valid YAML 1.2.
             advance();
         }
         if (!closed) {
