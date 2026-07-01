@@ -98,6 +98,45 @@ void test_alias_in_sequence() {
     CHECK_EQ(std::string((*list)[1].asString()), "banana", "list[1] == banana");
 }
 
+// Circular alias references must be rejected, not infinite-loop on clone.
+// ZYaml's "register anchor only after its value is fully parsed" semantics
+// naturally prevent cycles: an alias to a still-being-parsed anchor hits
+// UnknownAnchor. This test pins that invariant so a future change to
+// eager anchor registration doesn't silently reintroduce the crash.
+void test_self_referential_alias_rejected() {
+    // a: &a \n  b: *a  — *a resolves before &a's value parse completes
+    auto doc = zyaml::parse("a: &a\n  b: *a\n");
+    CHECK(!doc.has_value(), "self-referential alias should be rejected");
+    if (doc.has_value()) return;
+    CHECK(doc.error().code == zyaml::YamlErrorCode::UnknownAnchor,
+          "self-reference should report UnknownAnchor");
+}
+
+void test_indirect_cycle_rejected() {
+    // &a references &b which references &a — neither is registered when
+    // the first alias resolves. Block context so aliases are actually
+    // resolved (flow-context aliases are a known limitation — see below).
+    auto doc = zyaml::parse("a: &a\n  x: *b\nb: &b\n  y: *a\n");
+    CHECK(!doc.has_value(), "indirect cycle should be rejected");
+    if (doc.has_value()) return;
+    CHECK(doc.error().code == zyaml::YamlErrorCode::UnknownAnchor,
+          "indirect cycle should report UnknownAnchor");
+}
+
+// Known limitation: aliases inside flow collections are not resolved —
+// `*name` is stored as a plain scalar string. Pin the current behavior so
+// a future fix is a deliberate change, not a silent drift.
+void test_alias_in_flow_collection_is_plain_string() {
+    auto doc = zyaml::parse("a: &a value\nb: [*a]\n");
+    CHECK(doc.has_value(), "flow-with-alias should parse (alias not resolved)");
+    if (!doc) return;
+    const auto* b = doc->root().find("b");
+    CHECK(b != nullptr && b->isSequence(), "b is seq");
+    CHECK_EQ(b->size(), 1u, "1 element");
+    // *a is stored as the literal string "*a", not resolved to "value".
+    CHECK_EQ(std::string((*b)[0].asString()), "*a", "flow alias stored as string");
+}
+
 } // namespace
 
 int main() {
@@ -106,6 +145,9 @@ int main() {
     test_unknown_anchor_errors();
     test_duplicate_anchor_errors();
     test_alias_in_sequence();
+    test_self_referential_alias_rejected();
+    test_indirect_cycle_rejected();
+    test_alias_in_flow_collection_is_plain_string();
 
     if (failures == 0) {
         std::cout << "zyaml M8 anchor tests passed\n";
