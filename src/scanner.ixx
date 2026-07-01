@@ -481,6 +481,11 @@ private:
                 }
                 result += lines[k];
             }
+            // The final line's newline is part of the content — chomping
+            // decides what to do with it (clip keeps one, strip removes,
+            // keep preserves). Add it before chomping so the logic is
+            // uniform with the literal path.
+            if (!lines.empty()) result += '\n';
         } else {
             // Literal: preserve newlines.
             for (const auto& l : lines) {
