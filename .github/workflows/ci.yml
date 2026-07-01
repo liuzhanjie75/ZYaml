@@ -20,6 +20,10 @@ jobs:
         build_type: [Debug, Release]
     steps:
       - uses: actions/checkout@v4
+      - name: Set up CMake 4.x
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: 4.0.x
       - name: Configure
         run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
       - name: Build
@@ -33,6 +37,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set up CMake 4.x
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: 4.0.x
       - name: Configure with fuzz_diff
         run: cmake -S . -B build_diff -G "Visual Studio 17 2022" -A x64 -DZYAML_BUILD_FUZZ_DIFF=ON
       - name: Build fuzz_diff
@@ -46,6 +54,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Set up CMake 4.x
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: 4.0.x
       - name: Configure with bench
         run: cmake -S . -B build_bench -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DZYAML_BUILD_BENCH=ON
       - name: Build
@@ -54,17 +66,27 @@ jobs:
         working-directory: build_bench
         run: ctest -C Release -L bench --output-on-failure
 
-  # ── Linux: Clang + modules (broader compiler coverage) ─────────────
+  # ── Linux: Clang 20 + modules (broader compiler coverage) ───────────
+  # Ubuntu's default clang is 16-18; the project requires Clang 20+ for
+  # module support. Install from the official LLVM apt repo and pin the
+  # compiler + clang-scan-deps explicitly.
   linux-clang:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install clang-scan-deps + ninja
+      - name: Set up CMake 4.x
+        uses: lukka/get-cmake@latest
+        with:
+          cmakeVersion: 4.0.x
+      - name: Install Clang 20 + ninja
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build clang clang-tools-extra
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 20
+          sudo apt-get install -y ninja-build
       - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=clang++
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_COMPILER=clang++-20 \
+            -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS=$(which clang-scan-deps-20)
       - name: Build
         run: cmake --build build
       - name: Test (default suite)
