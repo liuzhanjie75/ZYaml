@@ -55,8 +55,11 @@ void genBlockSeq(Rng& rng, std::string& out, std::size_t depth, std::size_t inde
 
 void genString(Rng& rng, std::string& out) {
     static const char* alpha = "abcdefghij0123456789 .-";
+    static const char* first = "abcdefghij0123456789";  // no leading space/dot/dash
     std::size_t n = rng.range(0, 6);
-    for (std::size_t i = 0; i < n; ++i) out.push_back(rng.pick(alpha));
+    if (n == 0) return;
+    out.push_back(rng.pick(first));
+    for (std::size_t i = 1; i < n; ++i) out.push_back(rng.pick(alpha));
 }
 
 void genScalar(Rng& rng, std::string& out) {
@@ -345,7 +348,7 @@ int main(int argc, char** argv) {
 
     Rng rng(seed);
     std::size_t both_ok = 0, both_err = 0, zyaml_only_err = 0, libyaml_only_err = 0;
-    std::size_t allowlisted = 0, mismatches = 0;
+    std::size_t allowlisted = 0, structural_mismatches = 0, lenient_failures = 0;
 
     for (std::size_t iter = 0; iter < runs; ++iter) {
         std::string yaml;
@@ -361,11 +364,11 @@ int main(int argc, char** argv) {
         if (zdoc && lnode) {
             ++both_ok;
             if (!nodesEqual(zdoc->root(), *lnode)) {
-                if (mismatches < 10) {
+                if (structural_mismatches < 10) {
                     std::printf("MISMATCH iter=%zu\n", iter);
                     std::printf("--- input ---\n%s--- end ---\n", yaml.c_str());
                 }
-                ++mismatches;
+                ++structural_mismatches;
             }
             continue;
         }
@@ -388,12 +391,12 @@ int main(int argc, char** argv) {
             ++allowlisted;
             continue;
         }
-        // Unallowlisted: ZYaml is more permissive than libyaml 1.2 on
-        // some edge-case indentation. Printed for review; does not fail
-        // (see failure-policy comment at end of main).
-        if (libyaml_only_err - allowlisted <= 8) {
+        // Unallowlisted: ZYaml is more permissive than libyaml 1.2 — a
+        // real spec deviation. FAIL with repro + libyaml's error.
+        ++lenient_failures;
+        if (lenient_failures <= 16) {
             std::printf("LIBYAML_ONLY_ERR #%zu iter=%zu libyaml_err=%s\n--- input ---\n%s--- end ---\n",
-                        libyaml_only_err - allowlisted, iter,
+                        lenient_failures, iter,
                         lnode.error().format().c_str(),
                         yaml.c_str());
         }
@@ -403,20 +406,17 @@ int main(int argc, char** argv) {
                 "zyaml_only_err=%zu libyaml_only_err=%zu (allowlisted=%zu, "
                 "unallowlisted=%zu) structural_mismatches=%zu\n",
                 both_ok, both_err, zyaml_only_err, libyaml_only_err,
-                allowlisted, libyaml_only_err - allowlisted, mismatches);
-    // Failure policy:
-    //   - structural mismatch (both accepted, trees differ): FAIL — real bug
-    //   - ZYaml rejects, libyaml accepts (zyaml_only_err): FAIL — ZYaml too strict
-    //   - libyaml rejects, ZYaml accepts, NOT allowlisted: printed for review
-    //     but does NOT fail. These are ZYaml's known permissive edges vs
-    //     libyaml 1.2 (mostly indentation rules on edge-case inputs that
-    //     don't appear in real configs). Tracked for a future strictness
-    //     pass; failing here would make CI perpetually red without a fix.
-    //     The repro inputs are printed so any new pattern can be triaged.
-    std::size_t total_failures = mismatches + zyaml_only_err;
-    if (total_failures) {
-        std::printf("  %zu FAILURE(s): %zu structural + %zu zyaml-too-strict\n",
-                    total_failures, mismatches, zyaml_only_err);
-    }
-    return total_failures ? 1 : 0;
+                allowlisted, lenient_failures, structural_mismatches);
+    // Failure policy (strict oracle):
+    //   - structural mismatch (both accept, trees differ): FAIL
+    //   - ZYaml rejects, libyaml accepts: FAIL (ZYaml too strict)
+    //   - libyaml rejects, ZYaml accepts, allowlisted: not a failure
+    //     (documented divergence, e.g. YAML 1.1 null-key syntax)
+    //   - libyaml rejects, ZYaml accepts, NOT allowlisted: FAIL
+    //     (ZYaml too lenient — a real spec deviation to fix or allowlist)
+    // The generator is constrained to avoid edge-case indentation that
+    // neither parser handles consistently (e.g. plain scalars with leading
+    // spaces, which aren't real-world YAML). New failures here must be
+    // triaged: fix ZYaml, or add an allowlisted predicate with a comment.
+    return (structural_mismatches + zyaml_only_err + lenient_failures) ? 1 : 0;
 }

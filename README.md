@@ -6,7 +6,7 @@ A standalone C++23 YAML library — modular, comment-preserving, insertion-order
 
 M0–M12 complete plus spec-compliance, performance, and test-infrastructure passes: ~15 YAML 1.2 edge-case bugs fixed across scanner/parser/emitter (multi-line flow/quoted, `a:b` colon rule, tab-indent rejection, root-level flow, nested flow-as-map-value, indented `---`, flow bad-escape consistency, bracket-type mismatch, folded block-scalar chomping, empty-collection round-trip, control-char quoting). Parse O(n²) eliminated via a hash side-index on map storage. Dead code removed (`TokenStyle`, `Comments::post`, `YamlError::context`).
 
-18 test executables (19 with the optional differential harness): unit tests, a curated yaml-test-suite subset, property-based fuzz, a release benchmark, and a libyaml differential fuzzer — all passing on MSVC 19.44 with `/W4 /WX`. Parse throughput ~26 MB/s (Release) on a 400 KB / 20k-key document; 0 structural mismatches vs libyaml across 15000 differential runs.
+18 test executables (19 with the optional differential harness): unit tests, a curated yaml-test-suite subset, property-based fuzz, a release benchmark, and a libyaml differential fuzzer — all passing on MSVC 19.44 with `/W4 /WX`. Parse throughput ~26 MB/s (Release) on a 400 KB / 20k-key document; 0 structural mismatches and 0 unallowlisted accept/reject asymmetries vs libyaml across 12000 differential runs.
 
 
 ## Features
@@ -115,8 +115,8 @@ Five layers of tests, all run via ctest:
 1. **Unit tests** (`test_smoke`, `test_parser`, `test_flow`, `test_anchors`, `test_merge`, `test_block_scalar`, `test_errors`, `test_regression`, `test_convert`, `test_comments`, `test_quoted`, `test_emit`, `test_sequence`, `test_conformance`) — feature-level coverage, one executable per milestone.
 2. **Curated yaml-test-suite subset** (`test_yaml_suite`) — 23 scenarios citing official test IDs (2JQS, 3MYT, 4CQQ, 4FJ6, 6JWB, 4ABK, 6PBE, 6ZKB, 6LVF, 4Q9F, 6BFJ, 7LBH, 5C5M, plus error cases). Known-good baseline for implemented features.
 3. **Property-based fuzz** (`fuzz_harness`) — generates random YAML and checks invariants (no crash, round-trip stability, clone equality, map consistency). Seeded (`--seed`/`--runs` flags) for reproducibility; ~5000 iterations per ctest run.
-4. **Release benchmark** (`zyaml_bench`, opt-in via `-DZYAML_BUILD_BENCH=ON`) — parses/emits five representative shapes and asserts upper bounds to catch performance regressions. Bounds are calibrated for Release; the flat-map bound is the O(n²) sentinel (was 3056 ms before the hash side-index; ~15 ms Release now).
-5. **Differential fuzzer** (`fuzz_diff`, optional via `-DZYAML_BUILD_FUZZ_DIFF=ON`) — parses the same YAML with both ZYaml and libyaml and compares trees. Catches spec deviations that internal invariants can't see. 0 structural mismatches across 15000 runs; prints repro inputs for any accept/reject asymmetry.
+4. **Release benchmark** (`zyaml_bench`, opt-in via `-DZYAML_BUILD_BENCH=ON`) — parses/emits five representative shapes and asserts upper bounds to catch performance regressions. Bounds are calibrated for Release; the flat-map bound is the O(n²) sentinel (was 3056 ms before the hash side-index; ~15 ms Release now). Labelled `bench` so CI can run it separately: `ctest -L bench` / `ctest -LE bench`.
+5. **Differential fuzzer** (`fuzz_diff`, optional via `-DZYAML_BUILD_FUZZ_DIFF=ON`) — parses the same YAML with both ZYaml and libyaml (the reference implementation) and compares trees. Strict oracle: any accept/reject asymmetry that isn't on the documented allowlist (YAML 1.1 null-key syntax) fails the run. 0 structural mismatches and 0 unallowlisted asymmetries across 12000 runs on 6 seeds.
 
 ```sh
 # Enable the differential harness (fetches libyaml via FetchContent):

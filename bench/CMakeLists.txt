@@ -1,13 +1,16 @@
 # Benchmark — parse/emit throughput on representative shapes.
 #
-# Built as a ctest that asserts performance bounds. Build with Release
-# for meaningful numbers:
-#   cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release
-#   cmake --build build_rel
-#   ctest --test-dir build_rel -R bench --output-on-failure
+# Opt-in (ZYAML_BUILD_BENCH, default OFF). Bounds are calibrated for
+# Release; the flat-map case flakes in Debug (~252 ms Debug vs ~15 ms
+# Release against a 500 ms bound). When enabled, the test is labelled
+# "bench" so CI can run it separately from the unit tests:
+#   ctest --test-dir build -L bench          # run only benchmarks
+#   ctest --test-dir build -LE bench          # run everything but benchmarks
 #
-# In Debug the bounds are still enforced but ~10x looser than Release
-# throughput, so Debug runs may flake on the flat-map bound.
+# Recommended invocation (Release):
+#   cmake -S . -B build_rel -G Ninja -DCMAKE_BUILD_TYPE=Release -DZYAML_BUILD_BENCH=ON
+#   cmake --build build_rel
+#   ctest --test-dir build_rel -L bench --output-on-failure
 
 add_executable(zyaml_bench bench.cpp)
 target_link_libraries(zyaml_bench PRIVATE ZYaml::ZYaml)
@@ -18,3 +21,4 @@ if(MSVC)
 endif()
 
 add_test(NAME zyaml_bench COMMAND zyaml_bench)
+set_tests_properties(zyaml_bench PROPERTIES LABELS "bench")
