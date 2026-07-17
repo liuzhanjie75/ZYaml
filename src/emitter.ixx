@@ -14,6 +14,7 @@ module;
 
 #include <string>
 #include <string_view>
+#include <optional>
 
 export module ZYaml:emitter;
 
